@@ -121,11 +121,28 @@ jobs:
           WLAN_DIR="$PWD/modules/qcom/opensource/wlan/qcacld-3.0"
           CFG_H="$KDIR/include/net/cfg80211.h"
 
-          # Подключаем только include-каталоги wlan/cnss (без camera/audio/bt)
+          # Выбираем правильный SNOC/icnss2 профиль для SM6225 вместо default
+          echo "=== Available qcacld configs ==="
+          ls "$WLAN_DIR/configs" || true
+          WLAN_PROFILE="default"
+          for prof in khaje bengal adrastea qca6174; do
+            if [ -f "$WLAN_DIR/configs/${prof}_defconfig" ]; then
+              WLAN_PROFILE="$prof"
+              break
+            fi
+          done
+          echo "Selected WLAN_PROFILE=$WLAN_PROFILE"
+
+          # Подключаем include-каталоги wlan + каталог с ce_api.h
           EXTRA_INC=""
           for d in $(find "$PWD/modules/qcom/opensource/wlan" -maxdepth 4 -type d -name "include" 2>/dev/null); do
             EXTRA_INC="$EXTRA_INC -I$d"
           done
+          CE_H="$(find "$PWD/modules/qcom/opensource/wlan" -name "ce_api.h" 2>/dev/null | head -n1)"
+          if [ -n "$CE_H" ]; then
+            EXTRA_INC="$EXTRA_INC -I$(dirname "$CE_H")"
+          fi
+          echo "CE_H=$CE_H"
 
           # Включаем MLO/link_id макросы qcacld-3.0, если они есть в cfg80211.h ядра
           MLO_FLAGS=""
@@ -142,7 +159,7 @@ jobs:
             KERNEL_SRC="$KDIR" \
             MODNAME=qca_cld3_wlan \
             CONFIG_QCA_CLD_WLAN=m \
-            CONFIG_QCA_CLD_WLAN_PROFILE=default \
+            CONFIG_QCA_CLD_WLAN_PROFILE="$WLAN_PROFILE" \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CC=clang \
