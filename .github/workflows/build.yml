@@ -75,6 +75,7 @@ jobs:
             --set-str CONFIG_LOCALVERSION "" \
             --disable CONFIG_LOCALVERSION_AUTO \
             --enable CONFIG_MODVERSIONS \
+            --enable CONFIG_NL80211_TESTMODE \
             --disable CONFIG_MODULE_SIG_ALL \
             --disable CONFIG_MODULE_SIG_FORCE
 
@@ -213,6 +214,7 @@ jobs:
           modinfo "$PWD/qca_cld3_wlan.ko"
           echo "=== CFI & __versions check ==="
           aarch64-linux-gnu-readelf -S "$PWD/qca_cld3_wlan.ko" | grep -E "cfi|versions" || true
+          aarch64-linux-gnu-readelf -s "$PWD/qca_cld3_wlan.ko" | grep -E "wlan_hdd_cfg80211_ops|pld_snoc_ops" || true
 
       - name: 8. Package KernelSU module ZIP
         run: |
