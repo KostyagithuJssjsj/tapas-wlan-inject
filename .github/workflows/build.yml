@@ -140,6 +140,25 @@ jobs:
             EXTRA_INC="$EXTRA_INC -I$d"
           done
 
+          # Ищем icnss2.h и cnss*.h (включая папки inc/) и гарантируем <soc/qcom/icnss2.h> до старта make
+          mkdir -p "$PWD/extra_inc/soc/qcom" "$PWD/extra_inc/net"
+          for h in $(find "$PWD/modules" "$KDIR" -type f \( -name "icnss2.h" -o -name "cnss2.h" -o -name "cnss_utils.h" -o -name "cnss_prealloc.h" -o -name "cnss_nl.h" \) 2>/dev/null); do
+            echo "Found header: $h"
+            base="$(basename "$h")"
+            if [ "$base" = "icnss2.h" ]; then
+              ln -sf "$h" "$PWD/extra_inc/soc/qcom/icnss2.h"
+            else
+              ln -sf "$h" "$PWD/extra_inc/net/$base"
+            fi
+          done
+          if [ ! -e "$PWD/extra_inc/soc/qcom/icnss2.h" ]; then
+            echo "icnss2.h not in modules/kernel, fetching from Xiaomi-Redmi-Pad-SE-Resources..."
+            curl -fsSL https://raw.githubusercontent.com/Xiaomi-Redmi-Pad-SE-Resources/android_kernel_xiaomi_sm6225/lineage-23.0/include/soc/qcom/icnss2.h               -o "$PWD/extra_inc/soc/qcom/icnss2.h" || true
+          fi
+          ls -la "$PWD/extra_inc/soc/qcom/" "$PWD/extra_inc/net/"
+          test -s "$PWD/extra_inc/soc/qcom/icnss2.h"
+          EXTRA_INC="$EXTRA_INC -I$PWD/extra_inc"
+
           # Включаем MLO/link_id макросы qcacld-3.0 под cfg80211.h ядра
           MLO_FLAGS=""
           grep -qF "unsigned int link_id" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT"
