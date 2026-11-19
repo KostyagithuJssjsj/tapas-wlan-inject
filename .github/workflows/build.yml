@@ -167,7 +167,7 @@ jobs:
             LLVM_IAS=1 \
             LOCALVERSION="" \
             KBUILD_MODPOST_WARN=1 \
-            EXTRA_CFLAGS="$EXTRA_INC $MLO_FLAGS -Wno-error" \
+            KCFLAGS="$EXTRA_INC $MLO_FLAGS -Wno-error" \
             -j"$(nproc)" \
             modules 2>&1 | tee build.log || {
               echo "=== FIRST COMPILER ERRORS ==="
