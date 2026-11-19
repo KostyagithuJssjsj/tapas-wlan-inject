@@ -1,0 +1,58 @@
+name: Build 30s test_hello.ko
+
+on:
+  push:
+    paths:
+      - '.github/workflows/test_hello.yml'
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Android Clang 14.0.7
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev python3 curl tar
+          mkdir -p "$PWD/aosp-clang"
+          curl -fsSL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r450784e.tar.gz" | tar -xz -C "$PWD/aosp-clang"
+          echo "$PWD/aosp-clang/bin" >> "$GITHUB_PATH"
+      - name: Clone kernel & prepare
+        run: |
+          git clone --depth=1 --branch topaz-t-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
+          cp device_defconfig kernel/.config
+          sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 41/; s/^EXTRAVERSION =.*/EXTRAVERSION =/' kernel/Makefile
+          touch kernel/.scmversion
+          kernel/scripts/config --file kernel/.config --set-str CONFIG_LOCALVERSION "" --disable CONFIG_LOCALVERSION_AUTO --enable CONFIG_MODVERSIONS --disable CONFIG_MODULE_SIG_ALL --disable CONFIG_MODULE_SIG_FORCE
+          make -C kernel ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 LLVM_IAS=1 LOCALVERSION="" olddefconfig
+          make -C kernel ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 LLVM_IAS=1 LOCALVERSION="" -j"$(nproc)" modules_prepare
+          python3 - kernel/Module.symvers <<'PY'
+          import re, sys
+          rows, skip = [], {"vmlinux", "EXPORT_SYMBOL", "EXPORT_SYMBOL_GPL"}
+          for line in open("device_symvers.txt", errors="ignore"):
+              m = re.search(r'0x[0-9a-fA-F]{1,8}', line)
+              if not m: continue
+              sym = next((t for t in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', line.replace(m.group(0), " ")) if t not in skip), None)
+              if sym: rows.append(f"0x{int(m.group(0),16):08x}\t{sym}\tvmlinux\tEXPORT_SYMBOL\t")
+          open(sys.argv[1], "w").write("\n".join(rows) + "\n")
+          PY
+      - name: Build test_hello.ko
+        run: |
+          mkdir -p hello_mod
+          cat <<'C' > hello_mod/test_hello.c
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          static int __init hello_init(void) { pr_info("TAPAS_HELLO_OK\n"); return 0; }
+          static void __exit hello_exit(void) { pr_info("TAPAS_HELLO_EXIT\n"); }
+          module_init(hello_init);
+          module_exit(hello_exit);
+          MODULE_LICENSE("GPL");
+          C
+          echo "obj-m += test_hello.o" > hello_mod/Makefile
+          make -C kernel M="$PWD/hello_mod" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 LLVM_IAS=1 LOCALVERSION="" KBUILD_MODPOST_WARN=1 modules
+          llvm-strip --strip-debug hello_mod/test_hello.ko
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test_hello
+          path: hello_mod/test_hello.ko
