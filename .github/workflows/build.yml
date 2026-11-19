@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: 'Ядро msm-5.15 (Qualcomm MSM)'
+        description: 'Qualcomm MSM ядро (содержит заголовки Qualcomm)'
         required: true
-        default: 'https://github.com/topnotchfreaks/kernel_msm-5.15'
+        default: 'https://android.googlesource.com/kernel/msm'
       kernel_branch:
-        description: 'Ветка ядра (codelinaro содержит заголовки Qualcomm)'
+        description: 'Тег/ветка ядра (ровно 5.15.41)'
         required: true
-        default: 'codelinaro'
+        default: 'android13-5.15-2022-08_r3'
       modules_repo:
         description: 'Модули SM6225 (qcacld-3.0 + platform)'
         required: true
@@ -45,20 +45,27 @@ jobs:
           done
           ./clang/bin/clang --version
 
-      - name: 4. Клонирование msm-5.15 (заголовки Qualcomm) и модулей WLAN
+      - name: 4. Клонирование Qualcomm msm-5.15 и модулей WLAN
         run: |
+          # Клонируем официальное дерево Qualcomm MSM
           git clone --depth=1 --branch "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
           git clone --depth=1 "${{ inputs.modules_repo }}" modules
-          # Проверяем, что нужный заголовок на месте
+
+          # Проверяем наличие нужного заголовка (от этого падала старая сборка)
           if [ -f "kernel/include/linux/qcom-iommu-util.h" ]; then
             echo "✅ qcom-iommu-util.h найден — источник ядра подходит."
           else
             echo "❌ qcom-iommu-util.h всё ещё отсутствует. Проверьте ветку."
             exit 1
           fi
-          # Выводим версию ядра (важно для vermagic)
+
+          # Проверяем версию ядра (должна быть строго 5.15.41 для совместимости)
           cd kernel
-          make kernelversion || true
+          KVER=$(make kernelversion)
+          echo "Версия склонированного ядра: $KVER"
+          if [ "$KVER" != "5.15.41" ]; then
+            echo "❌ Внимание: Ожидалась версия 5.15.41, получена $KVER. Возможны ошибки API."
+          fi
           cd ..
 
       - name: 5. Патч qcacld-3.0 и настройка Kbuild
