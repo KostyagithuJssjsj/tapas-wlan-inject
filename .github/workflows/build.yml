@@ -55,7 +55,7 @@ jobs:
       - name: 5. Strip -Werror from qcacld-3.0 Kbuild/Makefiles
         run: |
           find modules/qcom/opensource/wlan -type f \( -name "Kbuild*" -o -name "Makefile*" \) \
-            -exec sed -i 's/-Werror[^ ]*//g' {} +
+            -exec sed -i 's/-Werror\(=[a-zA-Z0-9_-]*\)\?//g' {} +
           sed -i 's/-Werror=strict-prototypes//g' "${{ env.KDIR }}/Makefile"
 
       - name: 6. Prepare kernel tree (vermagic 5.15.41 + device_symvers)
