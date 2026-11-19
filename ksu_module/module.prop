@@ -1,0 +1,6 @@
+id=tapas_wlan_inject
+name=Tapas WLAN Packet Injection
+version=v1.0
+versionCode=1
+author=builder
+description=Patched qca_cld3_wlan.ko with monitor TX injection

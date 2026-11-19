@@ -1,0 +1,125 @@
+name: Build Patched qca_cld3_wlan.ko
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'Репозиторий ядра tapas/topaz 5.15'
+        required: true
+        default: 'https://github.com/yougotme101/kernel_msm-5.15'
+      kernel_branch:
+        description: 'Ветка ядра (оставь пустой для ветки по умолчанию)'
+        required: false
+        default: ''
+      modules_repo:
+        description: 'Репозиторий модулей SM6225 (с qcacld-3.0)'
+        required: false
+        default: 'https://github.com/xiaomi-6225-AD/android_kernel_xiaomi_sm6225-modules'
+      modules_branch:
+        description: 'Ветка модулей (оставь пустой для ветки по умолчанию)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. Загрузка файлов из твоего репозитория
+        uses: actions/checkout@v4
+
+      - name: 2. Установка зависимостей сборки
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential cpio flex libssl-dev libelf-dev python3 zip curl git kmod
+
+      - name: 3. Скачивание AOSP Clang 14.0.7 (r450784e — как в родном модуле)
+        run: |
+          mkdir -p clang
+          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784e.tar.gz" | tar -xz -C clang
+          ./clang/bin/clang --version
+
+      - name: 4. Клонирование ядра и модулей WLAN
+        run: |
+          if [ -n "${{ inputs.kernel_branch }}" ]; then
+            git clone --depth=1 -b "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
+          else
+            git clone --depth=1 "${{ inputs.kernel_repo }}" kernel
+          fi
+
+          if [ -n "${{ inputs.modules_repo }}" ]; then
+            if [ -n "${{ inputs.modules_branch }}" ]; then
+              git clone --depth=1 -b "${{ inputs.modules_branch }}" "${{ inputs.modules_repo }}" modules
+            else
+              git clone --depth=1 "${{ inputs.modules_repo }}" modules
+            fi
+          fi
+
+      - name: 5. Поиск исходников qcacld-3.0 и применение патча
+        run: |
+          WLAN_DIR=$(find "$PWD/modules" "$PWD/kernel" -maxdepth 5 -type d -name "qcacld-3.0" 2>/dev/null | head -n 1)
+          if [ -z "$WLAN_DIR" ]; then
+            echo "ОШИБКА: папка qcacld-3.0 не найдена ни в kernel, ни в modules!"
+            exit 1
+          fi
+          echo "WLAN_DIR=$WLAN_DIR" >> $GITHUB_ENV
+          echo "Найден драйвер: $WLAN_DIR"
+          python3 patch_inject.py "$WLAN_DIR"
+
+      - name: 6. Подготовка ядра под vermagic 5.15.41 и подстановка твоих CRC
+        run: |
+          export PATH="$PWD/clang/bin:$PATH"
+          cd kernel
+          sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 41/' Makefile
+          sed -i 's/^EXTRAVERSION = .*/EXTRAVERSION =/' Makefile
+          mkdir -p out
+          cp ../device_defconfig out/.config
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "" \
+            --disable LOCALVERSION_AUTO \
+            --disable MODULE_SIG_FORCE \
+            --enable MODVERSIONS
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare -j$(nproc)
+          cp ../device_symvers.txt out/Module.symvers
+
+      - name: 7. Сборка и очистка qca_cld3_wlan.ko
+        run: |
+          export PATH="$PWD/clang/bin:$PATH"
+          WLAN_PARENT=$(dirname "$WLAN_DIR")
+          EXTRA_INC=""
+          for d in "$WLAN_PARENT/platform/inc" "$PWD/modules/qcom/opensource/wlan/platform/inc" "$PWD/kernel/drivers/net/wireless/cnss2"; do
+            [ -d "$d" ] && EXTRA_INC="$EXTRA_INC -I$d"
+          done
+
+          make -C "$PWD/kernel" O="$PWD/kernel/out" M="$WLAN_DIR" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            KBUILD_MODPOST_WARN=1 \
+            KERNEL_SRC="$PWD/kernel" \
+            WLAN_ROOT="$WLAN_DIR" \
+            WLAN_COMMON_ROOT="$WLAN_PARENT/qca-wifi-host-cmn" \
+            WLAN_FW_API="$WLAN_PARENT/fw-api" \
+            MODNAME=qca_cld3_wlan \
+            CONFIG_QCA_CLD_WLAN=m \
+            CONFIG_QCA_CLD_WLAN_PROFILE=default \
+            CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y \
+            EXTRA_CFLAGS="$EXTRA_INC" \
+            modules -j$(nproc)
+
+          KO=$(find "$WLAN_DIR" "$PWD/kernel/out" -name "*.ko" | grep -i wlan | head -n 1)
+          echo "Собран файл: $KO"
+          "$PWD/clang/bin/llvm-strip" --strip-debug "$KO" -o "$PWD/ksu_module/qca_cld3_wlan.ko"
+          ls -lh "$PWD/ksu_module/qca_cld3_wlan.ko"
+          modinfo "$PWD/ksu_module/qca_cld3_wlan.ko" | grep -E "vermagic|depends|name"
+
+      - name: 8. Упаковка модуля KernelSU
+        run: |
+          cd ksu_module
+          zip -r ../tapas_wlan_inject_ksu.zip .
+
+      - name: 9. Выгрузка готовых файлов в Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tapas-wlan-inject-ksu
+          path: |
+            tapas_wlan_inject_ksu.zip
+            ksu_module/qca_cld3_wlan.ko
