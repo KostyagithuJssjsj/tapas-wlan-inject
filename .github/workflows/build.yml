@@ -33,6 +33,9 @@ jobs:
           git clone --depth=1 --branch topaz-t-oss \
             https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git /tmp/topaz_hdrs
           cp -rn /tmp/topaz_hdrs/include/* kernel/include/ 2>/dev/null || true
+          cp -f /tmp/topaz_hdrs/include/net/cfg80211.h kernel/include/net/cfg80211.h
+          cp -f /tmp/topaz_hdrs/include/linux/ieee80211.h kernel/include/linux/ieee80211.h
+          cp -f /tmp/topaz_hdrs/include/uapi/linux/nl80211.h kernel/include/uapi/linux/nl80211.h
           rm -rf /tmp/topaz_hdrs
 
           git clone --depth=1 \
