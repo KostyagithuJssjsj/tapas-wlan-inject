@@ -11,7 +11,7 @@ if os.path.exists(kbuild):
         open(kbuild, "w").write(txt)
         print("[OK] Kbuild обновлён")
 
-# 2. Экспортируем обёртку hdd_mon_call_mgmt_tx из wlan_hdd_cfg80211.c
+# 2. В wlan_hdd_cfg80211.c сохраняем реальный канал монитора + экспортируем hdd_mon_call_mgmt_tx с логом
 cfg_file = os.path.join(root, "core/hdd/src/wlan_hdd_cfg80211.c")
 if os.path.exists(cfg_file):
     cfg_txt = open(cfg_file, errors="ignore").read()
@@ -21,12 +21,41 @@ if os.path.exists(cfg_file):
             print("[ERR] struct cfg80211_ops не найдена в wlan_hdd_cfg80211.c")
             sys.exit(1)
         ops_name = m_ops.group(1)
+
+        # Пробуем перехватить .set_monitor_channel чтобы знать точный канал (например ch 6 = 2437 МГц)
+        m_smc = re.search(r'(\.set_monitor_channel\s*=\s*)(\w+)', cfg_txt)
+        smc_hook_decl = ""
+        if m_smc:
+            orig_smc = m_smc.group(2)
+            smc_hook_decl = f"""
+static struct ieee80211_channel *mon_saved_chan;
+static int hdd_mon_set_chan_hook(struct wiphy *wiphy, struct cfg80211_chan_def *chandef)
+{{
+\tif (chandef && chandef->chan) {{
+\t\tmon_saved_chan = chandef->chan;
+\t\tpr_info("MON_INJ: set_monitor_channel freq=%u\\n", chandef->chan->center_freq);
+\t}}
+\treturn {orig_smc}(wiphy, chandef);
+}}
+"""
+            cfg_txt = cfg_txt[:m_ops.start()] + smc_hook_decl + "\n" + cfg_txt[m_ops.start():]
+            cfg_txt = re.sub(r'(\.set_monitor_channel\s*=\s*)' + re.escape(orig_smc),
+                             r'\1hdd_mon_set_chan_hook', cfg_txt, count=1)
+            print(f"[OK] Перехвачен set_monitor_channel ({orig_smc})")
+        else:
+            cfg_txt = cfg_txt[:m_ops.start()] + "\nstatic struct ieee80211_channel *mon_saved_chan;\n" + cfg_txt[m_ops.start():]
+
         wrapper = f"""
 /* === BEGIN MONITOR MGMT_TX WRAPPER === */
+static int mon_tx_log_cnt;
 int hdd_mon_call_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 \t\t\t struct cfg80211_mgmt_tx_params *params, u64 *cookie)
 {{
 \tstruct cfg80211_chan_def chandef;
+\tint rc = -EOPNOTSUPP;
+
+\tif (!params->chan && mon_saved_chan)
+\t\tparams->chan = mon_saved_chan;
 
 \tif (!params->chan) {{
 \t\tmemset(&chandef, 0, sizeof(chandef));
@@ -44,8 +73,13 @@ int hdd_mon_call_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 \t\t\tparams->chan = &wiphy->bands[NL80211_BAND_2GHZ]->channels[0];
 \t}}
 \tif ({ops_name}.mgmt_tx)
-\t\treturn {ops_name}.mgmt_tx(wiphy, wdev, params, cookie);
-\treturn -EOPNOTSUPP;
+\t\trc = {ops_name}.mgmt_tx(wiphy, wdev, params, cookie);
+\tif (mon_tx_log_cnt < 10) {{
+\t\tmon_tx_log_cnt++;
+\t\tpr_info("MON_INJ: mgmt_tx len=%zu freq=%u rc=%d\\n",
+\t\t\tparams->len, params->chan ? params->chan->center_freq : 0, rc);
+\t}}
+\treturn rc;
 }}
 /* === END MONITOR MGMT_TX WRAPPER === */
 """
@@ -89,6 +123,20 @@ if not match:
 print(f"[OK] Найдена структура мониторинга в: {target_file}")
 txt = open(target_file).read()
 
+# 4. Будим TX-очередь и carrier в hdd_mon_open, чтобы ядро передавало пакеты в ndo_start_xmit
+m_open = re.search(r'(hdd_mon_open\s*\(\s*struct\s+net_device\s*\*\s*(\w+)\s*\)\s*\{)', txt)
+if m_open:
+    dev_arg = m_open.group(2)
+    # Ищем первый return 0; после hdd_mon_open
+    m_ret = re.search(r'\breturn\s+0\s*;', txt[m_open.end():m_open.end()+2000])
+    if m_ret:
+        pos = m_open.end() + m_ret.start()
+        wake_code = f"netif_carrier_on({dev_arg});\n\tnetif_tx_start_all_queues({dev_arg});\n\tpr_info(\"MON_INJ: hdd_mon_open TX queue woken\\n\");\n\t"
+        txt = txt[:pos] + wake_code + txt[pos:]
+        print(f"[OK] Добавлен netif_tx_start_all_queues({dev_arg}) в hdd_mon_open")
+        # Переищем match после вставки
+        match = re.search(patterns[0], txt) or re.search(patterns[1], txt)
+
 headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n"
 inject_code = r"""
 /* === BEGIN MONITOR TX INJECTION PATCH === */
@@ -99,6 +147,7 @@ static struct sk_buff_head mon_tx_q;
 static struct work_struct mon_tx_work;
 static struct net_device *mon_tx_dev;
 static bool mon_tx_inited;
+static int mon_xmit_log_cnt;
 
 static void hdd_mon_tx_worker(struct work_struct *work)
 {
@@ -145,6 +194,11 @@ static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *d
 	if (rtap_len > skb->len || skb->len - rtap_len < 10) {
 		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
+	}
+
+	if (mon_xmit_log_cnt < 5) {
+		mon_xmit_log_cnt++;
+		pr_info("MON_INJ: xmit skb_len=%u rtap=%u\n", skb->len, rtap_len);
 	}
 
 	skb_pull(skb, rtap_len);
