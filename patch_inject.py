@@ -11,7 +11,31 @@ if os.path.exists(kbuild):
         open(kbuild, "w").write(txt)
         print("[OK] Kbuild обновлён")
 
-# 2. Ищем структуру net_device_ops для монитора по всей папке core/hdd
+# 2. Экспортируем обёртку hdd_mon_call_mgmt_tx из wlan_hdd_cfg80211.c
+cfg_file = os.path.join(root, "core/hdd/src/wlan_hdd_cfg80211.c")
+if os.path.exists(cfg_file):
+    cfg_txt = open(cfg_file, errors="ignore").read()
+    if "hdd_mon_call_mgmt_tx" not in cfg_txt:
+        m_ops = re.search(r'struct\s+cfg80211_ops\s+(\w+)\s*=', cfg_txt)
+        if not m_ops:
+            print("[ERR] struct cfg80211_ops не найдена в wlan_hdd_cfg80211.c")
+            sys.exit(1)
+        ops_name = m_ops.group(1)
+        wrapper = f"""
+/* === BEGIN MONITOR MGMT_TX WRAPPER === */
+int hdd_mon_call_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
+\t\t\t struct cfg80211_mgmt_tx_params *params, u64 *cookie)
+{{
+\tif ({ops_name}.mgmt_tx)
+\t\treturn {ops_name}.mgmt_tx(wiphy, wdev, params, cookie);
+\treturn -EOPNOTSUPP;
+}}
+/* === END MONITOR MGMT_TX WRAPPER === */
+"""
+        open(cfg_file, "w").write(cfg_txt + wrapper)
+        print(f"[OK] Добавлена обёртка hdd_mon_call_mgmt_tx через {ops_name}")
+
+# 3. Ищем структуру net_device_ops для монитора по всей папке core/hdd
 hdd_dir = os.path.join(root, "core/hdd")
 patterns = [
     re.compile(r'((?:static\s+)?(?:const\s+)?struct\s+net_device_ops\s+\w+\s*=\s*\{[^}]*hdd_mon_open[^}]*\};)', re.S),
@@ -42,15 +66,7 @@ for pat in patterns:
         break
 
 if not match:
-    print("[ERR] Структура net_device_ops для мониторинга не найдена. Совпадения в core/hdd:")
-    for dirpath, _, filenames in os.walk(hdd_dir):
-        for fn in sorted(filenames):
-            if not fn.endswith(".c"):
-                continue
-            fp = os.path.join(dirpath, fn)
-            for idx, line in enumerate(open(fp, errors="ignore"), 1):
-                if "hdd_mon_open" in line or ("net_device_ops" in line and "mon" in line.lower()):
-                    print(f"  {fp}:{idx}: {line.strip()}")
+    print("[ERR] Структура net_device_ops для мониторинга не найдена.")
     sys.exit(1)
 
 print(f"[OK] Найдена структура мониторинга в: {target_file}")
@@ -59,6 +75,9 @@ txt = open(target_file).read()
 headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n"
 inject_code = r"""
 /* === BEGIN MONITOR TX INJECTION PATCH === */
+extern int hdd_mon_call_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
+				struct cfg80211_mgmt_tx_params *params, u64 *cookie);
+
 static struct sk_buff_head mon_tx_q;
 static struct work_struct mon_tx_work;
 static struct net_device *mon_tx_dev;
@@ -84,12 +103,10 @@ static void hdd_mon_tx_worker(struct work_struct *work)
 		params.dont_wait_for_ack = true;
 		if (wdev->preset_chandef.chan)
 			params.chan = wdev->preset_chandef.chan;
-		else if (wdev->chandef.chan)
-			params.chan = wdev->chandef.chan;
 		else if (wdev->wiphy && wdev->wiphy->bands[NL80211_BAND_2GHZ])
 			params.chan = &wdev->wiphy->bands[NL80211_BAND_2GHZ]->channels[0];
-		if (wdev->wiphy && wdev->wiphy->ops && wdev->wiphy->ops->mgmt_tx)
-			wdev->wiphy->ops->mgmt_tx(wdev->wiphy, wdev, &params, &cookie);
+		if (wdev->wiphy)
+			hdd_mon_call_mgmt_tx(wdev->wiphy, wdev, &params, &cookie);
 		dev_kfree_skb_any(skb);
 	}
 }
