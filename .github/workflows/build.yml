@@ -18,7 +18,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            bc bison flex libssl-dev libelf-dev \
+            bc bison flex libssl-dev libelf-dev dwarves \
             python3 cpio xz-utils zip kmod curl tar
           mkdir -p "$PWD/aosp-clang"
           curl -fsSL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r450784e.tar.gz" \
@@ -76,7 +76,7 @@ jobs:
           "$KDIR/scripts/config" --file "$KDIR/.config" \
             --set-str CONFIG_LOCALVERSION "" \
             --disable CONFIG_LOCALVERSION_AUTO \
-            --enable CONFIG_MODVERSIONS \
+            --enable CONFIG_MODVERSIONS --enable CONFIG_DEBUG_INFO_BTF --enable CONFIG_DEBUG_INFO_BTF_MODULES \
             --module CONFIG_CFG80211 \
             --enable CONFIG_NL80211_TESTMODE \
             --disable CONFIG_MODULE_SIG_ALL \
@@ -218,6 +218,7 @@ jobs:
           echo "=== CFI & __versions check ==="
           aarch64-linux-gnu-readelf -S "$PWD/qca_cld3_wlan.ko" | grep -E "cfi|versions" || true
           aarch64-linux-gnu-readelf -s "$PWD/qca_cld3_wlan.ko" | grep -E "wlan_hdd_cfg80211_ops|pld_snoc_ops" || true
+          aarch64-linux-gnu-readelf -r "$PWD/qca_cld3_wlan.ko" | grep -A 3 "rela\.gnu\.linkonce\.this_module" || true
 
       - name: 8. Package KernelSU module ZIP
         run: |

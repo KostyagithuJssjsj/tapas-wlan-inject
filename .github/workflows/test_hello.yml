@@ -14,7 +14,7 @@ jobs:
       - name: Install Android Clang 14.0.7
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev python3 curl tar
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev dwarves python3 curl tar
           mkdir -p "$PWD/aosp-clang"
           curl -fsSL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r450784e.tar.gz" | tar -xz -C "$PWD/aosp-clang"
           echo "$PWD/aosp-clang/bin" >> "$GITHUB_PATH"
@@ -24,7 +24,7 @@ jobs:
           cp device_defconfig kernel/.config
           sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 41/; s/^EXTRAVERSION =.*/EXTRAVERSION =/' kernel/Makefile
           touch kernel/.scmversion
-          kernel/scripts/config --file kernel/.config --set-str CONFIG_LOCALVERSION "" --disable CONFIG_LOCALVERSION_AUTO --enable CONFIG_MODVERSIONS --disable CONFIG_MODULE_SIG_ALL --disable CONFIG_MODULE_SIG_FORCE
+          kernel/scripts/config --file kernel/.config --set-str CONFIG_LOCALVERSION "" --disable CONFIG_LOCALVERSION_AUTO --enable CONFIG_MODVERSIONS --enable CONFIG_DEBUG_INFO_BTF --enable CONFIG_DEBUG_INFO_BTF_MODULES --disable CONFIG_MODULE_SIG_ALL --disable CONFIG_MODULE_SIG_FORCE
           make -C kernel ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 LLVM_IAS=1 LOCALVERSION="" olddefconfig
           make -C kernel ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 LLVM_IAS=1 LOCALVERSION="" -j"$(nproc)" modules_prepare
           python3 - kernel/Module.symvers <<'PY'
@@ -52,6 +52,7 @@ jobs:
           echo "obj-m += test_hello.o" > hello_mod/Makefile
           make -C kernel M="$PWD/hello_mod" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 LLVM_IAS=1 LOCALVERSION="" KBUILD_MODPOST_WARN=1 modules
           llvm-strip --strip-debug hello_mod/test_hello.ko
+          aarch64-linux-gnu-readelf -r hello_mod/test_hello.ko | grep -A 3 "rela\.gnu\.linkonce\.this_module"
       - uses: actions/upload-artifact@v4
         with:
           name: test_hello
