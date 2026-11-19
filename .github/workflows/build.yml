@@ -46,7 +46,11 @@ jobs:
 
       - name: 4. Apply TX injection patch
         run: |
-          python3 patch_inject.py
+          WLAN_DIR="$PWD/modules/qcom/opensource/wlan/qcacld-3.0"
+          ln -sfn "$WLAN_DIR" "$PWD/qcacld-3.0"
+          if ! python3 patch_inject.py "$WLAN_DIR"; then
+            (cd "$WLAN_DIR" && python3 "$GITHUB_WORKSPACE/patch_inject.py")
+          fi
 
       - name: 5. Strip -Werror from qcacld-3.0 Kbuild/Makefiles
         run: |
@@ -58,12 +62,10 @@ jobs:
           KDIR="${{ env.KDIR }}"
           cp device_defconfig "$KDIR/.config"
 
-          # Фиксируем точную версию 5.15.41 без суффиксов (+ / -dirty / -gXXXX)
           sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 41/' "$KDIR/Makefile"
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' "$KDIR/Makefile"
           touch "$KDIR/.scmversion"
 
-          # Убираем локальную версию и не требуем ключ подписи при сборке
           "$KDIR/scripts/config" --file "$KDIR/.config" \
             --set-str CONFIG_LOCALVERSION "" \
             --disable CONFIG_LOCALVERSION_AUTO \
@@ -90,7 +92,6 @@ jobs:
             -j"$(nproc)" \
             modules_prepare
 
-          # Подставляем Module.symvers из device_symvers.txt (поддерживаются форматы 2 и 4 колонки)
           python3 - "$KDIR/Module.symvers" <<'PY'
           import sys
           out_path = sys.argv[1]
@@ -119,7 +120,6 @@ jobs:
           KDIR="${{ env.KDIR }}"
           WLAN_DIR="$PWD/modules/qcom/opensource/wlan/qcacld-3.0"
 
-          # Автоматически подключаем include-каталоги из modules (cnss2, icnss2 и т.д.), если они есть
           EXTRA_INC=""
           for d in $(find "$PWD/modules" -maxdepth 4 -type d -name "include"); do
             EXTRA_INC="$EXTRA_INC -I$d"
