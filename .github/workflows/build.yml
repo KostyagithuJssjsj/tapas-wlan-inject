@@ -1,179 +1,172 @@
-name: Build Patched qca_cld3_wlan.ko
+name: Build patched qca_cld3_wlan.ko (tapas)
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
-    inputs:
-      kernel_repo:
-        description: 'Qualcomm MSM ядро (содержит заголовки Qualcomm)'
-        required: true
-        default: 'https://android.googlesource.com/kernel/msm'
-      kernel_branch:
-        description: 'Ветка ядра MSM'
-        required: true
-        default: 'android13-5.15'
-      modules_repo:
-        description: 'Модули SM6225 (qcacld-3.0 + platform)'
-        required: true
-        default: 'https://github.com/xiaomi-6225-AD/android_kernel_xiaomi_sm6225-modules'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: 1. Загрузка файлов из твоего репозитория
+      - name: 1. Checkout repository
         uses: actions/checkout@v4
 
-      - name: 2. Установка зависимостей
+      - name: 2. Install toolchain and dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential cpio flex libssl-dev libelf-dev python3 zip curl git kmod
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bc bison flex libssl-dev libelf-dev \
+            python3 cpio xz-utils zip kmod
 
-      - name: 3. Установка Clang и LLVM
+      - name: 3. Clone Xiaomi SM6225 msm-5.15 kernel (topaz-t-oss) & modules
         run: |
-          mkdir -p clang/bin
-          VER=""
-          for v in 14 15 16 17 18 ""; do
-            PKG_SFX=${v:+-$v}
-            if sudo apt-get install -y "clang${PKG_SFX}" "lld${PKG_SFX}" "llvm${PKG_SFX}"; then
-              VER="$PKG_SFX"
-              break
-            fi
-          done
-          for tool in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
-            BIN=$(command -v "${tool}${VER}" || command -v "$tool" || true)
-            [ -n "$BIN" ] && ln -sf "$BIN" "$PWD/clang/bin/$tool"
-          done
-          ./clang/bin/clang --version
+          git clone --depth=1 --branch topaz-t-oss \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
 
-      - name: 4. Клонирование Qualcomm msm-5.15 (версия 5.15.41) и модулей WLAN
-        run: |
-          # Клонируем официальное дерево Qualcomm MSM. Загружаем историю, чтобы найти 5.15.41
-          git clone --depth=500 --branch "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
-          
-          cd kernel
-          # Ищем коммит с версией 5.15.41
-          COMMIT_HASH=$(git log --oneline --grep="Linux 5.15.41" --grep="v5.15.41" -n 1 | cut -d' ' -f1)
-          
-          if [ -z "$COMMIT_HASH" ]; then
-            echo "❌ Коммит 5.15.41 не найден в последних 500 коммитах. Загружаем глубже..."
-            git fetch --depth=3000
-            COMMIT_HASH=$(git log --oneline --grep="Linux 5.15.41" --grep="v5.15.41" -n 1 | cut -d' ' -f1)
-          fi
+          git clone --depth=1 \
+            https://github.com/xiaomi-6225-AD/android_kernel_xiaomi_sm6225-modules.git modules
 
-          if [ -z "$COMMIT_HASH" ]; then
-            echo "❌ Не удалось найти коммит 5.15.41. Вывод последних коммитов для анализа:"
-            git log --oneline -n 15
-            exit 1
-          fi
-          
-          echo "Переключаемся на коммит $COMMIT_HASH (соответствует версии 5.15.41)"
-          git checkout "$COMMIT_HASH"
-          
-          # Проверяем версию ядра
-          KVER=$(make kernelversion)
-          echo "Версия склонированного ядра: $KVER"
-          if [ "$KVER" != "5.15.41" ]; then
-            echo "⚠️ Внимание: Makefile сообщает версию $KVER, но мы попытаемся продолжить."
-          fi
-          
-          # Проверяем наличие ключевого заголовка Qualcomm
-          if [ -f "include/linux/qcom-iommu-util.h" ]; then
-            echo "✅ qcom-iommu-util.h найден — источник ядра подходит."
+          if [ -f kernel/Makefile ]; then
+            KDIR="$PWD/kernel"
+          elif [ -f kernel/kernel_platform/msm-kernel/Makefile ]; then
+            KDIR="$PWD/kernel/kernel_platform/msm-kernel"
           else
-            echo "❌ qcom-iommu-util.h отсутствует. Дерево не подходит."
-            exit 1
+            KDIR="$(dirname "$(find kernel -maxdepth 3 -name Makefile -exec grep -l '^VERSION = 5' {} + | head -n1)")"
           fi
-          cd ..
-          
-          # Клонируем модули WLAN
-          git clone --depth=1 "${{ inputs.modules_repo }}" modules
+          echo "KDIR=$KDIR" >> "$GITHUB_ENV"
 
-      - name: 5. Патч qcacld-3.0 и настройка Kbuild
+          echo "=== Kernel Makefile ==="
+          head -n 5 "$KDIR/Makefile"
+          echo "=== Check qcom-iommu-util.h ==="
+          find "$KDIR" -name "qcom-iommu-util.h" || true
+
+      - name: 4. Apply TX injection patch
         run: |
-          WLAN_DIR=$(find "$PWD/modules" -maxdepth 5 -type d -name "qcacld-3.0" | head -n 1)
-          echo "WLAN_DIR=$WLAN_DIR" >> $GITHUB_ENV
-          python3 patch_inject.py "$WLAN_DIR"
+          python3 patch_inject.py
 
-          # Убираем -Werror и добавляем все заголовки Qualcomm platform напрямую в Kbuild
-          sed -i -E 's/-Werror(=[^[:space:]]+)?//g' "$WLAN_DIR/Kbuild"
-          {
-            echo ""
-            echo "ccflags-y += -Wno-error -Wno-unused-function -Wno-incompatible-pointer-types"
-            find "$PWD/modules/qcom/opensource/wlan/platform" -type d -name "inc" 2>/dev/null | while read -r d; do
-              echo "ccflags-y += -I$d"
-            done
-          } >> "$WLAN_DIR/Kbuild"
-
-      - name: 6. Подготовка ядра (vermagic 5.15.41 + твои CRC)
+      - name: 5. Strip -Werror from qcacld-3.0 Kbuild/Makefiles
         run: |
-          export PATH="$PWD/clang/bin:$PATH"
-          cd kernel
-          rm -f localversion*
-          touch .scmversion
-          mkdir -p out
-          cp "$GITHUB_WORKSPACE/device_defconfig" out/.config
-          scripts/config --file out/.config \
-            --set-str LOCALVERSION "" \
-            --disable LOCALVERSION_AUTO \
-            --disable MODULE_SIG \
-            --disable MODULE_SIG_ALL \
-            --disable MODULE_SIG_FORCE \
-            --disable DEBUG_INFO_BTF \
-            --disable DEBUG_INFO_BTF_MODULES \
-            --disable TRIM_UNUSED_KSYMS \
-            --enable MODVERSIONS
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare -j$(nproc)
-          cp "$GITHUB_WORKSPACE/device_symvers.txt" out/Module.symvers
+          find modules/qcom/opensource/wlan -type f \( -name "Kbuild*" -o -name "Makefile*" \) \
+            -exec sed -i 's/-Werror\b//g' {} +
 
-      - name: 7. Сборка и очистка qca_cld3_wlan.ko
+      - name: 6. Prepare kernel tree (vermagic 5.15.41 + device_symvers)
         run: |
-          export PATH="$PWD/clang/bin:$PATH"
-          PROFILE="default"
-          for p in bengal khaje default; do
-            if [ -f "$WLAN_DIR/configs/${p}_defconfig" ]; then
-              PROFILE="$p"
-              break
-            fi
+          KDIR="${{ env.KDIR }}"
+          cp device_defconfig "$KDIR/.config"
+
+          # Фиксируем точную версию 5.15.41 без суффиксов (+ / -dirty / -gXXXX)
+          sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 41/' "$KDIR/Makefile"
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' "$KDIR/Makefile"
+          touch "$KDIR/.scmversion"
+
+          # Убираем локальную версию и не требуем ключ подписи при сборке
+          "$KDIR/scripts/config" --file "$KDIR/.config" \
+            --set-str CONFIG_LOCALVERSION "" \
+            --disable CONFIG_LOCALVERSION_AUTO \
+            --enable CONFIG_MODVERSIONS \
+            --disable CONFIG_MODULE_SIG_ALL \
+            --disable CONFIG_MODULE_SIG_FORCE
+
+          make -C "$KDIR" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            LOCALVERSION="" \
+            olddefconfig
+
+          make -C "$KDIR" \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            LOCALVERSION="" \
+            -j"$(nproc)" \
+            modules_prepare
+
+          # Подставляем Module.symvers из device_symvers.txt (поддерживаются форматы 2 и 4 колонки)
+          python3 - "$KDIR/Module.symvers" <<'PY'
+          import sys
+          out_path = sys.argv[1]
+          rows = []
+          with open("device_symvers.txt", "r", encoding="utf-8", errors="ignore") as f:
+              for line in f:
+                  line = line.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  parts = line.split()
+                  if len(parts) >= 4:
+                      rows.append("\t".join(parts[:4]))
+                  elif len(parts) == 2:
+                      crc, sym = parts
+                      if not crc.startswith("0x"):
+                          crc = "0x" + crc
+                      rows.append(f"{crc}\t{sym}\tvmlinux\tEXPORT_SYMBOL")
+          with open(out_path, "w", encoding="utf-8") as out:
+              out.write("\n".join(rows) + "\n")
+          print(f"Wrote {len(rows)} symbols to {out_path}")
+          PY
+
+      - name: 7. Build qca_cld3_wlan.ko
+        run: |
+          set -o pipefail
+          KDIR="${{ env.KDIR }}"
+          WLAN_DIR="$PWD/modules/qcom/opensource/wlan/qcacld-3.0"
+
+          # Автоматически подключаем include-каталоги из modules (cnss2, icnss2 и т.д.), если они есть
+          EXTRA_INC=""
+          for d in $(find "$PWD/modules" -maxdepth 4 -type d -name "include"); do
+            EXTRA_INC="$EXTRA_INC -I$d"
           done
-          echo "Используем профиль WLAN: $PROFILE"
+          echo "EXTRA_INC=$EXTRA_INC"
 
-          set +e
-          make -C "$PWD/kernel" O="$PWD/kernel/out" M="$WLAN_DIR" \
-            ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            KBUILD_MODPOST_WARN=1 \
-            KERNEL_SRC="$PWD/kernel" \
+          make -C "$KDIR" \
+            M="$WLAN_DIR" \
             WLAN_ROOT="$WLAN_DIR" \
+            KERNEL_SRC="$KDIR" \
             MODNAME=qca_cld3_wlan \
             CONFIG_QCA_CLD_WLAN=m \
-            CONFIG_QCA_CLD_WLAN_PROFILE="$PROFILE" \
-            CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y \
-            KCFLAGS="-Wno-error" \
-            modules -j$(nproc) 2>&1 | tee build.log
-          RC=${PIPESTATUS[0]}
-          set -e
+            CONFIG_QCA_CLD_WLAN_PROFILE=default \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CC=clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            LOCALVERSION="" \
+            KBUILD_MODPOST_WARN=1 \
+            EXTRA_CFLAGS="$EXTRA_INC -Wno-error" \
+            -j"$(nproc)" \
+            modules 2>&1 | tee build.log || {
+              echo "=== FIRST COMPILER ERRORS ==="
+              grep -n "error:" build.log | head -n 40
+              exit 1
+            }
 
-          if [ "$RC" -ne 0 ]; then
-            echo "========== ТОЧНЫЕ ОШИБКИ КОМПИЛЯЦИИ =========="
-            grep -E "error:|fatal error:" build.log | head -n 30
-            exit "$RC"
-          fi
+          KO_PATH="$(find "$WLAN_DIR" -maxdepth 2 -name "*.ko" | head -n1)"
+          test -n "$KO_PATH"
+          cp "$KO_PATH" "$PWD/qca_cld3_wlan.ko"
 
-          KO=$(find "$WLAN_DIR" "$PWD/kernel/out" -name "*.ko" | grep -i wlan | head -n 1)
-          echo "Собран файл: $KO"
-          "$PWD/clang/bin/llvm-strip" --strip-debug "$KO" -o "$PWD/ksu_module/qca_cld3_wlan.ko"
-          ls -lh "$PWD/ksu_module/qca_cld3_wlan.ko"
-          modinfo "$PWD/ksu_module/qca_cld3_wlan.ko" | grep -E "vermagic|depends|name"
+          echo "=== modinfo qca_cld3_wlan.ko ==="
+          modinfo "$PWD/qca_cld3_wlan.ko"
+          echo "=== CFI & __versions check ==="
+          aarch64-linux-gnu-readelf -S "$PWD/qca_cld3_wlan.ko" | grep -E "cfi|versions" || true
 
-      - name: 8. Упаковка модуля KernelSU
+      - name: 8. Package KernelSU module ZIP
         run: |
-          cd ksu_module
-          zip -r ../tapas_wlan_inject_ksu.zip .
+          mkdir -p ksu_module/vendor_dlkm/lib/modules
+          cp qca_cld3_wlan.ko ksu_module/vendor_dlkm/lib/modules/qca_cld3_wlan.ko
+          (cd ksu_module && zip -r ../tapas_wlan_inject_ksu.zip .)
 
-      - name: 9. Выгрузка артефактов
+      - name: 9. Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tapas-wlan-inject-ksu
+          name: tapas-qca_cld3_wlan
           path: |
+            qca_cld3_wlan.ko
             tapas_wlan_inject_ksu.zip
-            ksu_module/qca_cld3_wlan.ko
