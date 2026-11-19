@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: 'Репозиторий ядра tapas/topaz 5.15'
+        description: 'Репозиторий исходников ядра SM6225 5.15'
         required: true
-        default: 'https://github.com/yougotme101/kernel_msm-5.15'
+        default: 'https://github.com/Xiaomi-Redmi-Pad-SE-Resources/android_kernel_xiaomi_sm6225'
       kernel_branch:
-        description: 'Ветка ядра (оставь пустой для ветки по умолчанию)'
+        description: 'Ветка ядра'
         required: false
-        default: ''
+        default: 'lineage-23.0'
       modules_repo:
         description: 'Репозиторий модулей SM6225 (с qcacld-3.0)'
         required: false
@@ -70,7 +70,7 @@ jobs:
         run: |
           WLAN_DIR=$(find "$PWD/modules" "$PWD/kernel" -maxdepth 5 -type d -name "qcacld-3.0" 2>/dev/null | head -n 1)
           if [ -z "$WLAN_DIR" ]; then
-            echo "ОШИБКА: папка qcacld-3.0 не найдена ни в kernel, ни в modules!"
+            echo "ОШИБКА: папка qcacld-3.0 не найдена!"
             exit 1
           fi
           echo "WLAN_DIR=$WLAN_DIR" >> $GITHUB_ENV
@@ -80,44 +80,60 @@ jobs:
       - name: 6. Подготовка ядра под vermagic 5.15.41 и подстановка твоих CRC
         run: |
           export PATH="$PWD/clang/bin:$PATH"
-          cd kernel
+          MAKEFILE_PATH=$(find "$PWD/kernel" -maxdepth 3 -name "Makefile" -exec grep -l "PATCHLEVEL = 15" {} + 2>/dev/null | head -n 1)
+          if [ -z "$MAKEFILE_PATH" ]; then
+            echo "ОШИБКА: Makefile ядра 5.15 не найден. Содержимое папки kernel:"
+            ls -la "$PWD/kernel"
+            exit 1
+          fi
+          KERNEL_DIR=$(dirname "$MAKEFILE_PATH")
+          echo "KERNEL_DIR=$KERNEL_DIR" >> $GITHUB_ENV
+          echo "Корень ядра: $KERNEL_DIR"
+
+          cd "$KERNEL_DIR"
           sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 41/' Makefile
           sed -i 's/^EXTRAVERSION = .*/EXTRAVERSION =/' Makefile
+          rm -f localversion*
+          touch .scmversion
+
           mkdir -p out
-          cp ../device_defconfig out/.config
+          cp "$GITHUB_WORKSPACE/device_defconfig" out/.config
           scripts/config --file out/.config \
             --set-str LOCALVERSION "" \
             --disable LOCALVERSION_AUTO \
+            --disable MODULE_SIG \
+            --disable MODULE_SIG_ALL \
             --disable MODULE_SIG_FORCE \
+            --disable DEBUG_INFO_BTF \
+            --disable DEBUG_INFO_BTF_MODULES \
+            --disable TRIM_UNUSED_KSYMS \
             --enable MODVERSIONS
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 modules_prepare -j$(nproc)
-          cp ../device_symvers.txt out/Module.symvers
+          cp "$GITHUB_WORKSPACE/device_symvers.txt" out/Module.symvers
 
       - name: 7. Сборка и очистка qca_cld3_wlan.ko
         run: |
           export PATH="$PWD/clang/bin:$PATH"
           WLAN_PARENT=$(dirname "$WLAN_DIR")
-          EXTRA_INC=""
-          for d in "$WLAN_PARENT/platform/inc" "$PWD/modules/qcom/opensource/wlan/platform/inc" "$PWD/kernel/drivers/net/wireless/cnss2"; do
+          EXTRA_INC="-Wno-error"
+          for d in "$WLAN_PARENT/platform/inc" "$PWD/modules/qcom/opensource/wlan/platform/inc" "$KERNEL_DIR/drivers/net/wireless/cnss2"; do
             [ -d "$d" ] && EXTRA_INC="$EXTRA_INC -I$d"
           done
 
-          make -C "$PWD/kernel" O="$PWD/kernel/out" M="$WLAN_DIR" \
+          make -C "$KERNEL_DIR" O="$KERNEL_DIR/out" M="$WLAN_DIR" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             KBUILD_MODPOST_WARN=1 \
-            KERNEL_SRC="$PWD/kernel" \
+            KERNEL_SRC="$KERNEL_DIR" \
             WLAN_ROOT="$WLAN_DIR" \
-            WLAN_COMMON_ROOT="$WLAN_PARENT/qca-wifi-host-cmn" \
-            WLAN_FW_API="$WLAN_PARENT/fw-api" \
             MODNAME=qca_cld3_wlan \
             CONFIG_QCA_CLD_WLAN=m \
             CONFIG_QCA_CLD_WLAN_PROFILE=default \
             CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y \
-            EXTRA_CFLAGS="$EXTRA_INC -Wno-error" \
+            EXTRA_CFLAGS="$EXTRA_INC" \
             modules -j$(nproc)
 
-          KO=$(find "$WLAN_DIR" "$PWD/kernel/out" -name "*.ko" | grep -i wlan | head -n 1)
+          KO=$(find "$WLAN_DIR" "$KERNEL_DIR/out" -name "*.ko" | grep -i wlan | head -n 1)
           echo "Собран файл: $KO"
           "$PWD/clang/bin/llvm-strip" --strip-debug "$KO" -o "$PWD/ksu_module/qca_cld3_wlan.ko"
           ls -lh "$PWD/ksu_module/qca_cld3_wlan.ko"
