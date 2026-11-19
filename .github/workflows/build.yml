@@ -58,6 +58,8 @@ jobs:
 
       - name: 5. Strip -Werror from qcacld-3.0 Kbuild/Makefiles
         run: |
+          find modules/qcom/opensource/wlan -type f \( -name "Kbuild*" -o -name "*defconfig" \) \
+            -exec sed -i 's/CONFIG_PANIC_ON_BUG[[:space:]]*:=[[:space:]]*y/CONFIG_PANIC_ON_BUG := n/g; s/-DPANIC_ON_BUG//g' {} +
           find modules/qcom/opensource/wlan -type f \( -name "Kbuild*" -o -name "Makefile*" \) \
             -exec sed -i 's/-Werror\(=[a-zA-Z0-9_-]*\)\?//g' {} +
           sed -i 's/-Werror=strict-prototypes//g' "${{ env.KDIR }}/Makefile"
