@@ -4,21 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: 'Репозиторий исходников ядра SM6225 5.15'
+        description: 'GKI ядро 5.15.41'
         required: true
-        default: 'https://github.com/Xiaomi-Redmi-Pad-SE-Resources/android_kernel_xiaomi_sm6225'
+        default: 'https://android.googlesource.com/kernel/common'
       kernel_branch:
-        description: 'Ветка ядра'
-        required: false
-        default: 'lineage-23.0'
+        description: 'Тег/ветка ядра (ровно 5.15.41)'
+        required: true
+        default: 'android13-5.15-2022-08_r3'
       modules_repo:
-        description: 'Репозиторий модулей SM6225 (с qcacld-3.0)'
-        required: false
+        description: 'Модули SM6225 (qcacld-3.0 + platform)'
+        required: true
         default: 'https://github.com/xiaomi-6225-AD/android_kernel_xiaomi_sm6225-modules'
-      modules_branch:
-        description: 'Ветка модулей (оставь пустой для ветки по умолчанию)'
-        required: false
-        default: ''
 
 jobs:
   build:
@@ -27,7 +23,7 @@ jobs:
       - name: 1. Загрузка файлов из твоего репозитория
         uses: actions/checkout@v4
 
-      - name: 2. Установка зависимостей сборки
+      - name: 2. Установка зависимостей
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential cpio flex libssl-dev libelf-dev python3 zip curl git kmod
@@ -48,54 +44,34 @@ jobs:
             [ -n "$BIN" ] && ln -sf "$BIN" "$PWD/clang/bin/$tool"
           done
           ./clang/bin/clang --version
-          ./clang/bin/llvm-strip --version
 
-      - name: 4. Клонирование ядра и модулей WLAN
+      - name: 4. Клонирование ядра 5.15.41 и модулей WLAN
         run: |
-          if [ -n "${{ inputs.kernel_branch }}" ]; then
-            git clone --depth=1 -b "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
-          else
-            git clone --depth=1 "${{ inputs.kernel_repo }}" kernel
-          fi
+          git clone --depth=1 --branch "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
+          git clone --depth=1 "${{ inputs.modules_repo }}" modules
 
-          if [ -n "${{ inputs.modules_repo }}" ]; then
-            if [ -n "${{ inputs.modules_branch }}" ]; then
-              git clone --depth=1 -b "${{ inputs.modules_branch }}" "${{ inputs.modules_repo }}" modules
-            else
-              git clone --depth=1 "${{ inputs.modules_repo }}" modules
-            fi
-          fi
-
-      - name: 5. Поиск исходников qcacld-3.0 и применение патча
+      - name: 5. Патч qcacld-3.0 и настройка Kbuild
         run: |
-          WLAN_DIR=$(find "$PWD/modules" "$PWD/kernel" -maxdepth 5 -type d -name "qcacld-3.0" 2>/dev/null | head -n 1)
-          if [ -z "$WLAN_DIR" ]; then
-            echo "ОШИБКА: папка qcacld-3.0 не найдена!"
-            exit 1
-          fi
+          WLAN_DIR=$(find "$PWD/modules" -maxdepth 5 -type d -name "qcacld-3.0" | head -n 1)
           echo "WLAN_DIR=$WLAN_DIR" >> $GITHUB_ENV
-          echo "Найден драйвер: $WLAN_DIR"
           python3 patch_inject.py "$WLAN_DIR"
 
-      - name: 6. Подготовка ядра под vermagic 5.15.41 и подстановка твоих CRC
+          # Убираем -Werror и добавляем все заголовки Qualcomm platform напрямую в Kbuild
+          sed -i -E 's/-Werror(=[^[:space:]]+)?//g' "$WLAN_DIR/Kbuild"
+          {
+            echo ""
+            echo "ccflags-y += -Wno-error -Wno-unused-function -Wno-incompatible-pointer-types"
+            find "$PWD/modules/qcom/opensource/wlan/platform" -type d -name "inc" 2>/dev/null | while read -r d; do
+              echo "ccflags-y += -I$d"
+            done
+          } >> "$WLAN_DIR/Kbuild"
+
+      - name: 6. Подготовка ядра (vermagic 5.15.41 + твои CRC)
         run: |
           export PATH="$PWD/clang/bin:$PATH"
-          MAKEFILE_PATH=$(find "$PWD/kernel" -maxdepth 3 -name "Makefile" -exec grep -l "PATCHLEVEL = 15" {} + 2>/dev/null | head -n 1)
-          if [ -z "$MAKEFILE_PATH" ]; then
-            echo "ОШИБКА: Makefile ядра 5.15 не найден. Содержимое папки kernel:"
-            ls -la "$PWD/kernel"
-            exit 1
-          fi
-          KERNEL_DIR=$(dirname "$MAKEFILE_PATH")
-          echo "KERNEL_DIR=$KERNEL_DIR" >> $GITHUB_ENV
-          echo "Корень ядра: $KERNEL_DIR"
-
-          cd "$KERNEL_DIR"
-          sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 41/' Makefile
-          sed -i 's/^EXTRAVERSION = .*/EXTRAVERSION =/' Makefile
+          cd kernel
           rm -f localversion*
           touch .scmversion
-
           mkdir -p out
           cp "$GITHUB_WORKSPACE/device_defconfig" out/.config
           scripts/config --file out/.config \
@@ -115,25 +91,37 @@ jobs:
       - name: 7. Сборка и очистка qca_cld3_wlan.ko
         run: |
           export PATH="$PWD/clang/bin:$PATH"
-          WLAN_PARENT=$(dirname "$WLAN_DIR")
-          EXTRA_INC="-Wno-error"
-          for d in "$WLAN_PARENT/platform/inc" "$PWD/modules/qcom/opensource/wlan/platform/inc" "$KERNEL_DIR/drivers/net/wireless/cnss2"; do
-            [ -d "$d" ] && EXTRA_INC="$EXTRA_INC -I$d"
+          PROFILE="default"
+          for p in bengal khaje default; do
+            if [ -f "$WLAN_DIR/configs/${p}_defconfig" ]; then
+              PROFILE="$p"
+              break
+            fi
           done
+          echo "Используем профиль WLAN: $PROFILE"
 
-          make -C "$KERNEL_DIR" O="$KERNEL_DIR/out" M="$WLAN_DIR" \
+          set +e
+          make -C "$PWD/kernel" O="$PWD/kernel/out" M="$WLAN_DIR" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             KBUILD_MODPOST_WARN=1 \
-            KERNEL_SRC="$KERNEL_DIR" \
+            KERNEL_SRC="$PWD/kernel" \
             WLAN_ROOT="$WLAN_DIR" \
             MODNAME=qca_cld3_wlan \
             CONFIG_QCA_CLD_WLAN=m \
-            CONFIG_QCA_CLD_WLAN_PROFILE=default \
+            CONFIG_QCA_CLD_WLAN_PROFILE="$PROFILE" \
             CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y \
-            EXTRA_CFLAGS="$EXTRA_INC" \
-            modules -j$(nproc)
+            KCFLAGS="-Wno-error" \
+            modules -j$(nproc) 2>&1 | tee build.log
+          RC=${PIPESTATUS[0]}
+          set -e
 
-          KO=$(find "$WLAN_DIR" "$KERNEL_DIR/out" -name "*.ko" | grep -i wlan | head -n 1)
+          if [ "$RC" -ne 0 ]; then
+            echo "========== ТОЧНЫЕ ОШИБКИ КОМПИЛЯЦИИ =========="
+            grep -E "error:|fatal error:" build.log | head -n 30
+            exit "$RC"
+          fi
+
+          KO=$(find "$WLAN_DIR" "$PWD/kernel/out" -name "*.ko" | grep -i wlan | head -n 1)
           echo "Собран файл: $KO"
           "$PWD/clang/bin/llvm-strip" --strip-debug "$KO" -o "$PWD/ksu_module/qca_cld3_wlan.ko"
           ls -lh "$PWD/ksu_module/qca_cld3_wlan.ko"
@@ -144,7 +132,7 @@ jobs:
           cd ksu_module
           zip -r ../tapas_wlan_inject_ksu.zip .
 
-      - name: 9. Выгрузка готовых файлов в Artifacts
+      - name: 9. Выгрузка артефактов
         uses: actions/upload-artifact@v4
         with:
           name: tapas-wlan-inject-ksu
