@@ -94,25 +94,32 @@ jobs:
             modules_prepare
 
           python3 - "$KDIR/Module.symvers" <<'PY'
-          import sys
+          import re, sys
           out_path = sys.argv[1]
           rows = []
+          skip = {"vmlinux", "EXPORT_SYMBOL", "EXPORT_SYMBOL_GPL"}
           with open("device_symvers.txt", "r", encoding="utf-8", errors="ignore") as f:
               for line in f:
                   line = line.strip()
                   if not line or line.startswith("#"):
                       continue
-                  parts = line.split()
-                  if len(parts) >= 4:
-                      rows.append("\t".join(parts[:4]))
-                  elif len(parts) == 2:
-                      crc, sym = parts
-                      if not crc.startswith("0x"):
-                          crc = "0x" + crc
-                      rows.append(f"{crc}\t{sym}\tvmlinux\tEXPORT_SYMBOL")
-          with open(out_path, "w", encoding="utf-8") as out:
+                  m_crc = re.search(r'0x[0-9a-fA-F]{1,8}', line)
+                  if not m_crc:
+                      continue
+                  crc_val = int(m_crc.group(0), 16)
+                  rest = line.replace(m_crc.group(0), " ")
+                  sym = None
+                  for tok in re.findall(r'[A-Za-z_][A-Za-z0-9_]*', rest):
+                      if tok not in skip:
+                          sym = tok
+                          break
+                  if sym:
+                      rows.append(f"0x{crc_val:08x}\t{sym}\tvmlinux\tEXPORT_SYMBOL\t")
+          with open(out_path, "w", encoding="utf-8", newline="\n") as out:
               out.write("\n".join(rows) + "\n")
           print(f"Wrote {len(rows)} symbols to {out_path}")
+          for r in rows[:3]:
+              print("  SAMPLE:", repr(r))
           PY
 
       - name: 7. Build qca_cld3_wlan.ko
