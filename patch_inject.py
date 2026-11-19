@@ -16,7 +16,7 @@ cfg_file = os.path.join(root, "core/hdd/src/wlan_hdd_cfg80211.c")
 if os.path.exists(cfg_file):
     cfg_txt = open(cfg_file, errors="ignore").read()
     if "hdd_mon_call_mgmt_tx" not in cfg_txt:
-        m_ops = re.search(r'struct\s+cfg80211_ops\s+(\w+)\s*=', cfg_txt)
+        m_ops = re.search(r'(?:static\s+)?(?:const\s+)?struct\s+cfg80211_ops\s+(\w+)\s*=', cfg_txt)
         if not m_ops:
             print("[ERR] struct cfg80211_ops не найдена в wlan_hdd_cfg80211.c")
             sys.exit(1)
