@@ -2,12 +2,8 @@ import os, re, sys
 
 root = sys.argv[1] if len(sys.argv) > 1 else "qcacld-3.0"
 kbuild = os.path.join(root, "Kbuild")
-hdd_main = os.path.join(root, "core/hdd/src/wlan_hdd_main.c")
 
-if not os.path.exists(hdd_main):
-    sys.exit(f"[ERR] Не найден файл {hdd_main}")
-
-# 1. Включаем FEATURE_MONITOR_MODE_SUPPORT в Kbuild
+# 1. Включаем поддержку режима мониторинга в Kbuild
 if os.path.exists(kbuild):
     txt = open(kbuild).read()
     if "CONFIG_FEATURE_MONITOR_MODE_SUPPORT := y" not in txt:
@@ -15,17 +11,54 @@ if os.path.exists(kbuild):
         open(kbuild, "w").write(txt)
         print("[OK] Kbuild обновлён")
 
-# 2. Добавляем обработчик TX-инъекции в wlan_hdd_main.c
-txt = open(hdd_main).read()
-if "hdd_mon_inject_xmit" in txt:
-    print("[SKIP] Патч уже применён")
-    sys.exit(0)
+# 2. Ищем структуру net_device_ops для монитора по всей папке core/hdd
+hdd_dir = os.path.join(root, "core/hdd")
+patterns = [
+    re.compile(r'((?:static\s+)?(?:const\s+)?struct\s+net_device_ops\s+\w+\s*=\s*\{[^}]*hdd_mon_open[^}]*\};)', re.S),
+    re.compile(r'((?:static\s+)?(?:const\s+)?struct\s+net_device_ops\s+\w*mon\w*\s*=\s*\{[^}]+\};)', re.S),
+]
 
+target_file = None
+match = None
+
+for pat in patterns:
+    for dirpath, _, filenames in os.walk(hdd_dir):
+        for fn in sorted(filenames):
+            if not fn.endswith(".c"):
+                continue
+            fp = os.path.join(dirpath, fn)
+            txt = open(fp, errors="ignore").read()
+            if "hdd_mon_inject_xmit" in txt:
+                print(f"[SKIP] Уже пропатчено: {fp}")
+                sys.exit(0)
+            m = pat.search(txt)
+            if m:
+                target_file = fp
+                match = m
+                break
+        if match:
+            break
+    if match:
+        break
+
+if not match:
+    print("[ERR] Структура net_device_ops для мониторинга не найдена. Совпадения в core/hdd:")
+    for dirpath, _, filenames in os.walk(hdd_dir):
+        for fn in sorted(filenames):
+            if not fn.endswith(".c"):
+                continue
+            fp = os.path.join(dirpath, fn)
+            for idx, line in enumerate(open(fp, errors="ignore"), 1):
+                if "hdd_mon_open" in line or ("net_device_ops" in line and "mon" in line.lower()):
+                    print(f"  {fp}:{idx}: {line.strip()}")
+    sys.exit(1)
+
+print(f"[OK] Найдена структура мониторинга в: {target_file}")
+txt = open(target_file).read()
+
+headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n"
 inject_code = r"""
 /* === BEGIN MONITOR TX INJECTION PATCH === */
-#include <net/ieee80211_radiotap.h>
-#include <linux/workqueue.h>
-
 static struct sk_buff_head mon_tx_q;
 static struct work_struct mon_tx_work;
 static struct net_device *mon_tx_dev;
@@ -49,6 +82,12 @@ static void hdd_mon_tx_worker(struct work_struct *work)
 		params.len = skb->len;
 		params.no_cck = true;
 		params.dont_wait_for_ack = true;
+		if (wdev->preset_chandef.chan)
+			params.chan = wdev->preset_chandef.chan;
+		else if (wdev->chandef.chan)
+			params.chan = wdev->chandef.chan;
+		else if (wdev->wiphy && wdev->wiphy->bands[NL80211_BAND_2GHZ])
+			params.chan = &wdev->wiphy->bands[NL80211_BAND_2GHZ]->channels[0];
 		if (wdev->wiphy && wdev->wiphy->ops && wdev->wiphy->ops->mgmt_tx)
 			wdev->wiphy->ops->mgmt_tx(wdev->wiphy, wdev, &params, &cookie);
 		dev_kfree_skb_any(skb);
@@ -91,16 +130,19 @@ static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *d
 /* === END MONITOR TX INJECTION PATCH === */
 """
 
-m = re.search(r'(static\s+const\s+struct\s+net_device_ops\s+mon_drv_ops\s*=\s*\{[^}]+\};)', txt, re.S)
-if not m:
-    sys.exit("[ERR] Структура mon_drv_ops не найдена в wlan_hdd_main.c")
-
-block = m.group(1)
+block = match.group(1)
 if ".ndo_start_xmit" in block:
     new_block = re.sub(r'\.ndo_start_xmit\s*=\s*[^,\n]+', '.ndo_start_xmit = hdd_mon_inject_xmit', block)
 else:
     new_block = block.replace("{", "{\n\t.ndo_start_xmit = hdd_mon_inject_xmit,", 1)
 
-txt = txt[:m.start()] + inject_code + "\n" + new_block + txt[m.end():]
-open(hdd_main, "w").write(txt)
-print("[OK] wlan_hdd_main.c пропатчен")
+txt = txt[:match.start()] + inject_code + "\n" + new_block + txt[match.end():]
+
+inc_m = re.search(r'^\s*#include\s+.*$', txt, re.M)
+if inc_m:
+    txt = txt[:inc_m.end()] + headers + txt[inc_m.end():]
+else:
+    txt = headers + txt
+
+open(target_file, "w").write(txt)
+print("[OK] Патч TX-инъекции применён")
