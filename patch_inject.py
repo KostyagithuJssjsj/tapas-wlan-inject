@@ -26,6 +26,23 @@ if os.path.exists(cfg_file):
 int hdd_mon_call_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 \t\t\t struct cfg80211_mgmt_tx_params *params, u64 *cookie)
 {{
+\tstruct cfg80211_chan_def chandef;
+
+\tif (!params->chan) {{
+\t\tmemset(&chandef, 0, sizeof(chandef));
+\t\tif ({ops_name}.get_channel) {{
+#ifdef CFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT
+\t\t\tif ({ops_name}.get_channel(wiphy, wdev, 0, &chandef) == 0 && chandef.chan)
+\t\t\t\tparams->chan = chandef.chan;
+#else
+\t\t\tif ({ops_name}.get_channel(wiphy, wdev, &chandef) == 0 && chandef.chan)
+\t\t\t\tparams->chan = chandef.chan;
+#endif
+\t\t}}
+\t\tif (!params->chan && wiphy->bands[NL80211_BAND_2GHZ] &&
+\t\t    wiphy->bands[NL80211_BAND_2GHZ]->n_channels > 0)
+\t\t\tparams->chan = &wiphy->bands[NL80211_BAND_2GHZ]->channels[0];
+\t}}
 \tif ({ops_name}.mgmt_tx)
 \t\treturn {ops_name}.mgmt_tx(wiphy, wdev, params, cookie);
 \treturn -EOPNOTSUPP;
@@ -101,10 +118,6 @@ static void hdd_mon_tx_worker(struct work_struct *work)
 		params.len = skb->len;
 		params.no_cck = true;
 		params.dont_wait_for_ack = true;
-		if (wdev->preset_chandef.chan)
-			params.chan = wdev->preset_chandef.chan;
-		else if (wdev->wiphy && wdev->wiphy->bands[NL80211_BAND_2GHZ])
-			params.chan = &wdev->wiphy->bands[NL80211_BAND_2GHZ]->channels[0];
 		if (wdev->wiphy)
 			hdd_mon_call_mgmt_tx(wdev->wiphy, wdev, &params, &cookie);
 		dev_kfree_skb_any(skb);
