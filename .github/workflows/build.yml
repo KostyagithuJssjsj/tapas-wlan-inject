@@ -121,9 +121,6 @@ jobs:
           WLAN_DIR="$PWD/modules/qcom/opensource/wlan/qcacld-3.0"
           CFG_H="$KDIR/include/net/cfg80211.h"
 
-          # Выбираем правильный SNOC/icnss2 профиль для SM6225 вместо default
-          echo "=== Available qcacld configs ==="
-          ls "$WLAN_DIR/configs" || true
           WLAN_PROFILE="default"
           for prof in khaje bengal adrastea qca6174; do
             if [ -f "$WLAN_DIR/configs/${prof}_defconfig" ]; then
@@ -133,18 +130,16 @@ jobs:
           done
           echo "Selected WLAN_PROFILE=$WLAN_PROFILE"
 
-          # Подключаем include-каталоги wlan + каталог с ce_api.h
+          # Подключаем include-каталоги wlan + все нужные подкаталоги cmn/hif (SNOC/CE/dispatcher)
           EXTRA_INC=""
           for d in $(find "$PWD/modules/qcom/opensource/wlan" -maxdepth 4 -type d -name "include" 2>/dev/null); do
             EXTRA_INC="$EXTRA_INC -I$d"
           done
-          CE_H="$(find "$PWD/modules/qcom/opensource/wlan" -name "ce_api.h" 2>/dev/null | head -n1)"
-          if [ -n "$CE_H" ]; then
-            EXTRA_INC="$EXTRA_INC -I$(dirname "$CE_H")"
-          fi
-          echo "CE_H=$CE_H"
+          for d in $(find "$WLAN_DIR/cmn/hif" -maxdepth 3 -type d ! -name pcie ! -name usb ! -name sdio ! -name ipcie 2>/dev/null); do
+            EXTRA_INC="$EXTRA_INC -I$d"
+          done
 
-          # Включаем MLO/link_id макросы qcacld-3.0, если они есть в cfg80211.h ядра
+          # Включаем MLO/link_id макросы qcacld-3.0 под cfg80211.h ядра
           MLO_FLAGS=""
           grep -qF "unsigned int link_id" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT"
           grep -qF "struct link_station_parameters" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_LINK_STA_PARAMS_PRESENT"
@@ -160,6 +155,8 @@ jobs:
             MODNAME=qca_cld3_wlan \
             CONFIG_QCA_CLD_WLAN=m \
             CONFIG_QCA_CLD_WLAN_PROFILE="$WLAN_PROFILE" \
+            CONFIG_HIF_SNOC=y \
+            CONFIG_ICNSS2=y \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CC=clang \
