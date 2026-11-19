@@ -128,7 +128,7 @@ jobs:
             OFF="$(get_off)"
             echo "NEW offsetof(net_device, ieee80211_ptr) = $OFF"
           fi
-          test "$OFF" = "0x5d8"
+          test "$OFF" = "0x2f8"
 
           python3 - "$KDIR/Module.symvers" <<'PY'
           import re, sys
