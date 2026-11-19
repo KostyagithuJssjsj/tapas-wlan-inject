@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: 'GKI ядро 5.15.41'
+        description: 'Ядро msm-5.15 (Qualcomm MSM)'
         required: true
-        default: 'https://android.googlesource.com/kernel/common'
+        default: 'https://github.com/topnotchfreaks/kernel_msm-5.15'
       kernel_branch:
-        description: 'Тег/ветка ядра (ровно 5.15.41)'
+        description: 'Ветка ядра (codelinaro содержит заголовки Qualcomm)'
         required: true
-        default: 'android13-5.15-2022-08_r3'
+        default: 'codelinaro'
       modules_repo:
         description: 'Модули SM6225 (qcacld-3.0 + platform)'
         required: true
@@ -45,10 +45,21 @@ jobs:
           done
           ./clang/bin/clang --version
 
-      - name: 4. Клонирование ядра 5.15.41 и модулей WLAN
+      - name: 4. Клонирование msm-5.15 (заголовки Qualcomm) и модулей WLAN
         run: |
           git clone --depth=1 --branch "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
           git clone --depth=1 "${{ inputs.modules_repo }}" modules
+          # Проверяем, что нужный заголовок на месте
+          if [ -f "kernel/include/linux/qcom-iommu-util.h" ]; then
+            echo "✅ qcom-iommu-util.h найден — источник ядра подходит."
+          else
+            echo "❌ qcom-iommu-util.h всё ещё отсутствует. Проверьте ветку."
+            exit 1
+          fi
+          # Выводим версию ядра (важно для vermagic)
+          cd kernel
+          make kernelversion || true
+          cd ..
 
       - name: 5. Патч qcacld-3.0 и настройка Kbuild
         run: |
