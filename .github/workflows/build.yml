@@ -28,15 +28,12 @@ jobs:
 
       - name: 3. Clone Xiaomi SM6225 msm-5.15 kernel (topaz-t-oss) & modules
         run: |
-          git clone --depth=1 \
-            https://github.com/HappoLaw/kernel_msm-5.15.git kernel
-          if [ ! -f kernel/include/linux/qcom-iommu-util.h ]; then
-            git clone --depth=1 --branch topaz-t-oss \
-              https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git /tmp/topaz_hdrs
-            cp -rn /tmp/topaz_hdrs/include/linux/qcom*.h kernel/include/linux/ 2>/dev/null || true
-            cp -rn /tmp/topaz_hdrs/include/soc/qcom kernel/include/soc/ 2>/dev/null || true
-            rm -rf /tmp/topaz_hdrs
-          fi
+          git clone --depth=1 --branch android13-5.15 \
+            https://android.googlesource.com/kernel/common.git kernel
+          git clone --depth=1 --branch topaz-t-oss \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git /tmp/topaz_hdrs
+          cp -rn /tmp/topaz_hdrs/include/* kernel/include/ 2>/dev/null || true
+          rm -rf /tmp/topaz_hdrs
 
           git clone --depth=1 \
             https://github.com/xiaomi-6225-AD/android_kernel_xiaomi_sm6225-modules.git modules
