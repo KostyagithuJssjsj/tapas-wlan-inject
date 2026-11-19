@@ -55,7 +55,8 @@ jobs:
       - name: 5. Strip -Werror from qcacld-3.0 Kbuild/Makefiles
         run: |
           find modules/qcom/opensource/wlan -type f \( -name "Kbuild*" -o -name "Makefile*" \) \
-            -exec sed -i 's/-Werror\b//g' {} +
+            -exec sed -i 's/-Werror[^ ]*//g' {} +
+          sed -i 's/-Werror=strict-prototypes//g' "${{ env.KDIR }}/Makefile"
 
       - name: 6. Prepare kernel tree (vermagic 5.15.41 + device_symvers)
         run: |
@@ -164,7 +165,7 @@ jobs:
             LLVM_IAS=1 \
             LOCALVERSION="" \
             KBUILD_MODPOST_WARN=1 \
-            KCFLAGS="$EXTRA_INC $MLO_FLAGS -Wno-error" \
+            KCFLAGS="$EXTRA_INC $MLO_FLAGS -Wno-error -Wno-strict-prototypes -Wno-error=strict-prototypes -Wno-deprecated-non-prototype" \
             -j"$(nproc)" \
             modules 2>&1 | tee build.log || {
               echo "=== FIRST COMPILER ERRORS ==="
