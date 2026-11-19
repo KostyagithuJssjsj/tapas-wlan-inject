@@ -119,12 +119,22 @@ jobs:
           set -o pipefail
           KDIR="${{ env.KDIR }}"
           WLAN_DIR="$PWD/modules/qcom/opensource/wlan/qcacld-3.0"
+          CFG_H="$KDIR/include/net/cfg80211.h"
 
+          # Подключаем только include-каталоги wlan/cnss (без camera/audio/bt)
           EXTRA_INC=""
-          for d in $(find "$PWD/modules" -maxdepth 4 -type d -name "include"); do
+          for d in $(find "$PWD/modules/qcom/opensource/wlan" -maxdepth 4 -type d -name "include" 2>/dev/null); do
             EXTRA_INC="$EXTRA_INC -I$d"
           done
-          echo "EXTRA_INC=$EXTRA_INC"
+
+          # Включаем MLO/link_id макросы qcacld-3.0, если они есть в cfg80211.h ядра
+          MLO_FLAGS=""
+          grep -qF "unsigned int link_id" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT"
+          grep -qF "struct link_station_parameters" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_LINK_STA_PARAMS_PRESENT"
+          grep -qF "int link_id, const u8 *mac_addr" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_MLO_KEY_OPERATION_SUPPORT"
+          grep -qF "MLD address of the peer" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_EXTERNAL_AUTH_MLO_SUPPORT"
+          grep -qF "unsigned int link_id, u16 punct_bitmap" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_RU_PUNCT_NOTIFY"
+          echo "MLO_FLAGS=$MLO_FLAGS"
 
           make -C "$KDIR" \
             M="$WLAN_DIR" \
@@ -140,7 +150,7 @@ jobs:
             LLVM_IAS=1 \
             LOCALVERSION="" \
             KBUILD_MODPOST_WARN=1 \
-            EXTRA_CFLAGS="$EXTRA_INC -Wno-error" \
+            EXTRA_CFLAGS="$EXTRA_INC $MLO_FLAGS -Wno-error" \
             -j"$(nproc)" \
             modules 2>&1 | tee build.log || {
               echo "=== FIRST COMPILER ERRORS ==="
