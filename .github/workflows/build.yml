@@ -75,6 +75,7 @@ jobs:
             --set-str CONFIG_LOCALVERSION "" \
             --disable CONFIG_LOCALVERSION_AUTO \
             --enable CONFIG_MODVERSIONS \
+            --module CONFIG_CFG80211 \
             --enable CONFIG_NL80211_TESTMODE \
             --disable CONFIG_MODULE_SIG_ALL \
             --disable CONFIG_MODULE_SIG_FORCE
@@ -196,7 +197,7 @@ jobs:
             LLVM_IAS=1 \
             LOCALVERSION="" \
             KBUILD_MODPOST_WARN=1 \
-            KCFLAGS="$EXTRA_INC $MLO_FLAGS -Wno-error -Wno-strict-prototypes -Wno-error=strict-prototypes" \
+            KCFLAGS="$EXTRA_INC $MLO_FLAGS -DCONFIG_NL80211_TESTMODE=1 -Wno-error -Wno-strict-prototypes -Wno-error=strict-prototypes" \
             -j"$(nproc)" \
             modules 2>&1 | tee build.log || {
               echo "=== FIRST COMPILER ERRORS ==="
