@@ -8,9 +8,9 @@ on:
         required: true
         default: 'https://android.googlesource.com/kernel/msm'
       kernel_branch:
-        description: 'Тег/ветка ядра (ровно 5.15.41)'
+        description: 'Ветка ядра MSM'
         required: true
-        default: 'android13-5.15-2022-08_r3'
+        default: 'android13-5.15'
       modules_repo:
         description: 'Модули SM6225 (qcacld-3.0 + platform)'
         required: true
@@ -45,28 +45,48 @@ jobs:
           done
           ./clang/bin/clang --version
 
-      - name: 4. Клонирование Qualcomm msm-5.15 и модулей WLAN
+      - name: 4. Клонирование Qualcomm msm-5.15 (версия 5.15.41) и модулей WLAN
         run: |
-          # Клонируем официальное дерево Qualcomm MSM
-          git clone --depth=1 --branch "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
-          git clone --depth=1 "${{ inputs.modules_repo }}" modules
-
-          # Проверяем наличие нужного заголовка (от этого падала старая сборка)
-          if [ -f "kernel/include/linux/qcom-iommu-util.h" ]; then
-            echo "✅ qcom-iommu-util.h найден — источник ядра подходит."
-          else
-            echo "❌ qcom-iommu-util.h всё ещё отсутствует. Проверьте ветку."
-            exit 1
+          # Клонируем официальное дерево Qualcomm MSM. Загружаем историю, чтобы найти 5.15.41
+          git clone --depth=500 --branch "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
+          
+          cd kernel
+          # Ищем коммит с версией 5.15.41
+          COMMIT_HASH=$(git log --oneline --grep="Linux 5.15.41" --grep="v5.15.41" -n 1 | cut -d' ' -f1)
+          
+          if [ -z "$COMMIT_HASH" ]; then
+            echo "❌ Коммит 5.15.41 не найден в последних 500 коммитах. Загружаем глубже..."
+            git fetch --depth=3000
+            COMMIT_HASH=$(git log --oneline --grep="Linux 5.15.41" --grep="v5.15.41" -n 1 | cut -d' ' -f1)
           fi
 
-          # Проверяем версию ядра (должна быть строго 5.15.41 для совместимости)
-          cd kernel
+          if [ -z "$COMMIT_HASH" ]; then
+            echo "❌ Не удалось найти коммит 5.15.41. Вывод последних коммитов для анализа:"
+            git log --oneline -n 15
+            exit 1
+          fi
+          
+          echo "Переключаемся на коммит $COMMIT_HASH (соответствует версии 5.15.41)"
+          git checkout "$COMMIT_HASH"
+          
+          # Проверяем версию ядра
           KVER=$(make kernelversion)
           echo "Версия склонированного ядра: $KVER"
           if [ "$KVER" != "5.15.41" ]; then
-            echo "❌ Внимание: Ожидалась версия 5.15.41, получена $KVER. Возможны ошибки API."
+            echo "⚠️ Внимание: Makefile сообщает версию $KVER, но мы попытаемся продолжить."
+          fi
+          
+          # Проверяем наличие ключевого заголовка Qualcomm
+          if [ -f "include/linux/qcom-iommu-util.h" ]; then
+            echo "✅ qcom-iommu-util.h найден — источник ядра подходит."
+          else
+            echo "❌ qcom-iommu-util.h отсутствует. Дерево не подходит."
+            exit 1
           fi
           cd ..
+          
+          # Клонируем модули WLAN
+          git clone --depth=1 "${{ inputs.modules_repo }}" modules
 
       - name: 5. Патч qcacld-3.0 и настройка Kbuild
         run: |
