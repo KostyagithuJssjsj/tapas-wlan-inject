@@ -13,14 +13,18 @@ jobs:
       - name: 1. Checkout repository
         uses: actions/checkout@v4
 
-      - name: 2. Install toolchain and dependencies
+      - name: 2. Install toolchain (Android Clang 14.0.7 r450784e) and dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang lld llvm \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             bc bison flex libssl-dev libelf-dev \
-            python3 cpio xz-utils zip kmod
+            python3 cpio xz-utils zip kmod curl tar
+          mkdir -p "$PWD/aosp-clang"
+          curl -fsSL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r450784e.tar.gz" \
+            | tar -xz -C "$PWD/aosp-clang"
+          echo "$PWD/aosp-clang/bin" >> "$GITHUB_PATH"
+          "$PWD/aosp-clang/bin/clang" --version
 
       - name: 3. Clone Xiaomi SM6225 msm-5.15 kernel (topaz-t-oss) & modules
         run: |
@@ -179,7 +183,7 @@ jobs:
             M="$WLAN_DIR" \
             WLAN_ROOT="$WLAN_DIR" \
             KERNEL_SRC="$KDIR" \
-            MODNAME=qca_cld3_wlan \
+            MODNAME=wlan \
             CONFIG_QCA_CLD_WLAN=m \
             CONFIG_QCA_CLD_WLAN_PROFILE="$WLAN_PROFILE" \
             CONFIG_HIF_SNOC=y \
@@ -191,7 +195,7 @@ jobs:
             LLVM_IAS=1 \
             LOCALVERSION="" \
             KBUILD_MODPOST_WARN=1 \
-            KCFLAGS="$EXTRA_INC $MLO_FLAGS -Wno-error -Wno-strict-prototypes -Wno-error=strict-prototypes -Wno-deprecated-non-prototype" \
+            KCFLAGS="$EXTRA_INC $MLO_FLAGS -Wno-error -Wno-strict-prototypes -Wno-error=strict-prototypes" \
             -j"$(nproc)" \
             modules 2>&1 | tee build.log || {
               echo "=== FIRST COMPILER ERRORS ==="
@@ -202,6 +206,8 @@ jobs:
           KO_PATH="$(find "$WLAN_DIR" -maxdepth 2 -name "*.ko" | head -n1)"
           test -n "$KO_PATH"
           cp "$KO_PATH" "$PWD/qca_cld3_wlan.ko"
+          llvm-strip --strip-debug "$PWD/qca_cld3_wlan.ko"
+          ls -lh "$PWD/qca_cld3_wlan.ko"
 
           echo "=== modinfo qca_cld3_wlan.ko ==="
           modinfo "$PWD/qca_cld3_wlan.ko"
