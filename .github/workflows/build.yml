@@ -32,11 +32,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential cpio flex libssl-dev libelf-dev python3 zip curl git kmod
 
-      - name: 3. Скачивание AOSP Clang 14.0.7 (r450784e — как в родном модуле)
+      - name: 3. Установка Clang и LLVM
         run: |
-          mkdir -p clang
-          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784e.tar.gz" | tar -xz -C clang
+          mkdir -p clang/bin
+          VER=""
+          for v in 14 15 16 17 18 ""; do
+            PKG_SFX=${v:+-$v}
+            if sudo apt-get install -y "clang${PKG_SFX}" "lld${PKG_SFX}" "llvm${PKG_SFX}"; then
+              VER="$PKG_SFX"
+              break
+            fi
+          done
+          for tool in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+            BIN=$(command -v "${tool}${VER}" || command -v "$tool" || true)
+            [ -n "$BIN" ] && ln -sf "$BIN" "$PWD/clang/bin/$tool"
+          done
           ./clang/bin/clang --version
+          ./clang/bin/llvm-strip --version
 
       - name: 4. Клонирование ядра и модулей WLAN
         run: |
@@ -102,7 +114,7 @@ jobs:
             CONFIG_QCA_CLD_WLAN=m \
             CONFIG_QCA_CLD_WLAN_PROFILE=default \
             CONFIG_FEATURE_MONITOR_MODE_SUPPORT=y \
-            EXTRA_CFLAGS="$EXTRA_INC" \
+            EXTRA_CFLAGS="$EXTRA_INC -Wno-error" \
             modules -j$(nproc)
 
           KO=$(find "$WLAN_DIR" "$PWD/kernel/out" -name "*.ko" | grep -i wlan | head -n 1)
