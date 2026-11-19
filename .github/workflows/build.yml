@@ -103,15 +103,16 @@ jobs:
           # Проверяем реальный offsetof(struct net_device, ieee80211_ptr) через Kbuild (ожидаем 0x5d8)
           mkdir -p /tmp/chk_netdev
           cat <<'C' > /tmp/chk_netdev/chk_netdev.c
+          #include <linux/module.h>
           #include <linux/netdevice.h>
-          #include <linux/stddef.h>
-          char chk_off[offsetof(struct net_device, ieee80211_ptr)];
+          char chk_off[offsetof(struct net_device, ieee80211_ptr)] __used;
+          MODULE_LICENSE("GPL");
           C
           echo "obj-m += chk_netdev.o" > /tmp/chk_netdev/Makefile
           get_off() {
-            rm -f /tmp/chk_netdev/chk_netdev.o
-            make -C "$KDIR" M=/tmp/chk_netdev ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 LLVM_IAS=1 LOCALVERSION="" /tmp/chk_netdev/chk_netdev.o >/dev/null
-            aarch64-linux-gnu-readelf -s /tmp/chk_netdev/chk_netdev.o | awk '/chk_off/{printf "0x%x\n", $3}'
+            rm -f /tmp/chk_netdev/chk_netdev.ko /tmp/chk_netdev/chk_netdev.o
+            make -C "$KDIR" M=/tmp/chk_netdev ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 LLVM_IAS=1 LOCALVERSION="" KBUILD_MODPOST_WARN=1 modules >/dev/null
+            aarch64-linux-gnu-readelf -s /tmp/chk_netdev/chk_netdev.ko | awk '/chk_off/{printf "0x%x\n", $3; exit}'
           }
           OFF="$(get_off)"
           echo "offsetof(net_device, ieee80211_ptr) = $OFF (expected 0x5d8)"
