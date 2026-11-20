@@ -11,27 +11,202 @@ if os.path.exists(kbuild):
         open(kbuild, "w").write(txt)
         print("[OK] Kbuild обновлён")
 
-# 2. В wlan_hdd_cfg80211.c сохраняем реальный канал монитора + экспортируем hdd_mon_call_mgmt_tx с логом
+# Автоопределяем точные имена WMI API в текущем qcacld-3.0 (5.15)
+wmi_api_txt = ""
+for fn in ["cmn/wmi/inc/wmi_unified_api.h", "cmn/wmi/inc/wmi_unified_param.h",
+           "cmn/wmi/inc/wmi_unified_vdev_api.h", "cmn/wmi/inc/wmi_unified_vdev_param.h"]:
+    fp = os.path.join(root, fn)
+    if os.path.exists(fp):
+        wmi_api_txt += open(fp, errors="ignore").read() + "\n"
+
+if "wmi_mgmt_unified_cmd_send" in wmi_api_txt:
+    mgmt_send_fn = "wmi_mgmt_unified_cmd_send"
+else:
+    mgmt_send_fn = "wmi_unified_mgmt_tx_cmd_send"
+
+m_vc = re.search(r'struct\s+vdev_create_params\s*\{([^}]+)\}', wmi_api_txt, re.S)
+vc_id_field = "vdev_id" if (m_vc and "vdev_id" in m_vc.group(1)) else "if_id"
+print(f"[INFO] WMI API: {mgmt_send_fn}, vdev_create_params.{vc_id_field}")
+
+# 2. В core/wma/src/wma_dev_if.c добавляем обход @Loukious (hidden STA vdev + self-peer + WMI_MGMT_TX)
+wma_file = os.path.join(root, "core/wma/src/wma_dev_if.c")
+if os.path.exists(wma_file):
+    wma_txt = open(wma_file, errors="ignore").read()
+    if "wma_mon_inject_raw_frame" not in wma_txt:
+        wma_code = f"""
+/* === BEGIN LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
+#include "wmi_unified_api.h"
+
+static uint8_t wma_mon_inject_vdev_id = 1;
+static bool wma_mon_inject_vdev_ready;
+static uint32_t wma_mon_inject_last_freq;
+static int wma_mon_inject_log_cnt;
+static uint16_t wma_mon_desc_id;
+
+static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
+{{
+\tstruct vdev_create_params create_params;
+\tstruct vdev_start_params start_params;
+\tstruct peer_create_params peer_params;
+\tstruct vdev_up_params up_params;
+\tuint8_t mac[6] = {{0x02, 0x00, 0x00, 0x11, 0x22, 0x33}};
+\tuint8_t vdev_id = wma_mon_inject_vdev_id;
+\tQDF_STATUS status;
+
+\tif (!wma || !wma->wmi_handle)
+\t\treturn QDF_STATUS_E_INVAL;
+
+\tif (freq == 0)
+\t\tfreq = 2412;
+
+\tif (wma_mon_inject_vdev_ready && wma_mon_inject_last_freq == freq)
+\t\treturn QDF_STATUS_SUCCESS;
+
+\tif (!wma_mon_inject_vdev_ready) {{
+\t\tqdf_mem_zero(&create_params, sizeof(create_params));
+\t\tcreate_params.{vc_id_field} = vdev_id;
+\t\tcreate_params.type = WMI_VDEV_TYPE_STA;
+\t\tcreate_params.subtype = 0;
+\t\tcreate_params.nss_2g = 1;
+\t\tcreate_params.nss_5g = 1;
+\t\tcreate_params.pdev_id = 0;
+
+\t\tpr_info("MON_INJ: creating hidden STA vdev_id=%u\\n", vdev_id);
+\t\tstatus = wmi_unified_vdev_create_send(wma->wmi_handle, mac, &create_params);
+\t\tif (QDF_IS_STATUS_ERROR(status)) {{
+\t\t\tpr_err("MON_INJ: vdev_create failed: %d\\n", status);
+\t\t\treturn status;
+\t\t}}
+
+\t\tqdf_mem_zero(&peer_params, sizeof(peer_params));
+\t\tpeer_params.peer_addr = mac;
+\t\tpeer_params.peer_type = WMI_PEER_TYPE_DEFAULT;
+\t\tpeer_params.vdev_id = vdev_id;
+\t\tstatus = wmi_unified_peer_create_send(wma->wmi_handle, &peer_params);
+\t\tif (QDF_IS_STATUS_ERROR(status))
+\t\t\tpr_warn("MON_INJ: self-peer create failed: %d\\n", status);
+
+\t\tqdf_mdelay(15);
+\t}} else {{
+\t\tpr_info("MON_INJ: channel change %u -> %u on vdev_id=%u\\n",
+\t\t\twma_mon_inject_last_freq, freq, vdev_id);
+\t\twmi_unified_vdev_stop_send(wma->wmi_handle, vdev_id);
+\t\tqdf_mdelay(10);
+\t}}
+
+\tqdf_mem_zero(&start_params, sizeof(start_params));
+\tstart_params.vdev_id = vdev_id;
+\tstart_params.channel.mhz = freq;
+\tstart_params.channel.band_center_freq1 = freq;
+\tstart_params.channel.band_center_freq2 = 0;
+\tstart_params.channel.phy_mode = (freq < 5000) ? WMI_HOST_MODE_11G : WMI_HOST_MODE_11A;
+\tstart_params.channel.maxregpower = 20;
+\tstart_params.channel.maxpower = 20;
+\tstart_params.channel.minpower = 0;
+\tstart_params.beacon_intval = 100;
+\tstart_params.dtim_period = 1;
+\tstart_params.max_txpow = 20;
+
+\tpr_info("MON_INJ: starting hidden STA vdev_id=%u freq=%u\\n", vdev_id, freq);
+\tstatus = wmi_unified_vdev_start_send(wma->wmi_handle, &start_params);
+\tif (QDF_IS_STATUS_ERROR(status)) {{
+\t\tpr_err("MON_INJ: vdev_start failed: %d\\n", status);
+\t\treturn status;
+\t}}
+\tqdf_mdelay(20);
+
+\tif (!wma_mon_inject_vdev_ready) {{
+\t\tqdf_mem_zero(&up_params, sizeof(up_params));
+\t\tup_params.vdev_id = vdev_id;
+\t\tup_params.assoc_id = 1;
+\t\tstatus = wmi_unified_vdev_up_send(wma->wmi_handle, mac, &up_params);
+\t\tif (QDF_IS_STATUS_ERROR(status))
+\t\t\tpr_warn("MON_INJ: vdev_up failed: %d\\n", status);
+\t\tqdf_mdelay(10);
+\t}}
+
+\twma_mon_inject_vdev_ready = true;
+\twma_mon_inject_last_freq = freq;
+\tpr_info("MON_INJ: hidden STA vdev_id=%u READY on freq=%u!\\n", vdev_id, freq);
+\treturn QDF_STATUS_SUCCESS;
+}}
+
+int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32_t freq)
+{{
+\ttp_wma_handle wma;
+\tstruct wmi_mgmt_params tx_params;
+\tqdf_nbuf_t nbuf;
+\tQDF_STATUS status;
+
+\twma = cds_get_context(QDF_MODULE_ID_WMA);
+\tif (!wma || !wma->wmi_handle || !frame_data || frame_len < 10)
+\t\treturn -EINVAL;
+
+\tstatus = wma_create_mon_inject_vdev(wma, freq);
+\tif (QDF_IS_STATUS_ERROR(status))
+\t\treturn -EIO;
+
+\tnbuf = qdf_nbuf_alloc(NULL, frame_len + 64, 32, 4, false);
+\tif (!nbuf)
+\t\treturn -ENOMEM;
+
+\tqdf_nbuf_put_tail(nbuf, frame_len);
+\tqdf_mem_copy(qdf_nbuf_data(nbuf), frame_data, frame_len);
+
+\tstatus = qdf_nbuf_map_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
+\tif (QDF_IS_STATUS_ERROR(status)) {{
+\t\tqdf_nbuf_free(nbuf);
+\t\treturn -EIO;
+\t}}
+
+\tqdf_mem_zero(&tx_params, sizeof(tx_params));
+\ttx_params.vdev_id = wma_mon_inject_vdev_id;
+\ttx_params.tx_frame = nbuf;
+\ttx_params.frm_len = frame_len;
+\ttx_params.qdf_ctx = wma->qdf_dev;
+\ttx_params.chanfreq = freq ? freq : 2412;
+\ttx_params.desc_id = (++wma_mon_desc_id) & 0x3f;
+\ttx_params.pdata = qdf_nbuf_data(nbuf);
+\ttx_params.tx_flags = 0;
+
+\tstatus = {mgmt_send_fn}(wma->wmi_handle, &tx_params);
+\tif (wma_mon_inject_log_cnt < 10) {{
+\t\twma_mon_inject_log_cnt++;
+\t\tpr_info("MON_INJ: WMI_MGMT_TX vdev=%u len=%zu freq=%u status=%d\\n",
+\t\t\ttx_params.vdev_id, frame_len, tx_params.chanfreq, status);
+\t}}
+\tif (QDF_IS_STATUS_ERROR(status)) {{
+\t\tqdf_nbuf_unmap_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
+\t\tqdf_nbuf_free(nbuf);
+\t\treturn -EIO;
+\t}}
+\treturn 0;
+}}
+/* === END LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
+"""
+        open(wma_file, "w").write(wma_txt + wma_code)
+        print("[OK] Добавлен обход @Loukious (hidden STA vdev) в wma_dev_if.c")
+
+# 3. В wlan_hdd_cfg80211.c перехватываем set_monitor_channel и экспортируем частоту
 cfg_file = os.path.join(root, "core/hdd/src/wlan_hdd_cfg80211.c")
 if os.path.exists(cfg_file):
     cfg_txt = open(cfg_file, errors="ignore").read()
-    if "hdd_mon_call_mgmt_tx" not in cfg_txt:
+    if "hdd_mon_get_saved_freq" not in cfg_txt:
         m_ops = re.search(r'(?:static\s+)?(?:const\s+)?struct\s+cfg80211_ops\s+(\w+)\s*=', cfg_txt)
         if not m_ops:
-            print("[ERR] struct cfg80211_ops не найдена в wlan_hdd_cfg80211.c")
+            print("[ERR] struct cfg80211_ops не найдена")
             sys.exit(1)
-        ops_name = m_ops.group(1)
-
         m_smc = re.search(r'(\.set_monitor_channel\s*=\s*)(\w+)', cfg_txt)
         if m_smc:
             orig_smc = m_smc.group(2)
             smc_hook_decl = f"""
-static struct ieee80211_channel *mon_saved_chan;
+static uint32_t mon_saved_freq = 2412;
+uint32_t hdd_mon_get_saved_freq(void) {{ return mon_saved_freq; }}
 static int hdd_mon_set_chan_hook(struct wiphy *wiphy, struct cfg80211_chan_def *chandef)
 {{
 \tif (chandef && chandef->chan) {{
-\t\tmon_saved_chan = chandef->chan;
-\t\tpr_info("MON_INJ: set_monitor_channel freq=%u\\n", chandef->chan->center_freq);
+\t\tmon_saved_freq = chandef->chan->center_freq;
+\t\tpr_info("MON_INJ: set_monitor_channel freq=%u\\n", mon_saved_freq);
 \t}}
 \treturn {orig_smc}(wiphy, chandef);
 }}
@@ -39,52 +214,12 @@ static int hdd_mon_set_chan_hook(struct wiphy *wiphy, struct cfg80211_chan_def *
             cfg_txt = cfg_txt[:m_ops.start()] + smc_hook_decl + "\n" + cfg_txt[m_ops.start():]
             cfg_txt = re.sub(r'(\.set_monitor_channel\s*=\s*)' + re.escape(orig_smc),
                              r'\1hdd_mon_set_chan_hook', cfg_txt, count=1)
-            print(f"[OK] Перехвачен set_monitor_channel ({orig_smc})")
         else:
-            cfg_txt = cfg_txt[:m_ops.start()] + "\nstatic struct ieee80211_channel *mon_saved_chan;\n" + cfg_txt[m_ops.start():]
+            cfg_txt = cfg_txt[:m_ops.start()] + "\nuint32_t hdd_mon_get_saved_freq(void) { return 2412; }\n" + cfg_txt[m_ops.start():]
+        open(cfg_file, "w").write(cfg_txt)
+        print("[OK] Перехвачен set_monitor_channel в wlan_hdd_cfg80211.c")
 
-        wrapper = f"""
-/* === BEGIN MONITOR MGMT_TX WRAPPER === */
-static int mon_tx_log_cnt;
-int hdd_mon_call_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
-\t\t\t struct cfg80211_mgmt_tx_params *params, u64 *cookie)
-{{
-\tstruct cfg80211_chan_def chandef;
-\tint rc = -EOPNOTSUPP;
-
-\tif (!params->chan && mon_saved_chan)
-\t\tparams->chan = mon_saved_chan;
-
-\tif (!params->chan) {{
-\t\tmemset(&chandef, 0, sizeof(chandef));
-\t\tif ({ops_name}.get_channel) {{
-#ifdef CFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT
-\t\t\tif ({ops_name}.get_channel(wiphy, wdev, 0, &chandef) == 0 && chandef.chan)
-\t\t\t\tparams->chan = chandef.chan;
-#else
-\t\t\tif ({ops_name}.get_channel(wiphy, wdev, &chandef) == 0 && chandef.chan)
-\t\t\t\tparams->chan = chandef.chan;
-#endif
-\t\t}}
-\t\tif (!params->chan && wiphy->bands[NL80211_BAND_2GHZ] &&
-\t\t    wiphy->bands[NL80211_BAND_2GHZ]->n_channels > 0)
-\t\t\tparams->chan = &wiphy->bands[NL80211_BAND_2GHZ]->channels[0];
-\t}}
-\tif ({ops_name}.mgmt_tx)
-\t\trc = {ops_name}.mgmt_tx(wiphy, wdev, params, cookie);
-\tif (mon_tx_log_cnt < 10) {{
-\t\tmon_tx_log_cnt++;
-\t\tpr_info("MON_INJ: mgmt_tx len=%zu freq=%u rc=%d\\n",
-\t\t\tparams->len, params->chan ? params->chan->center_freq : 0, rc);
-\t}}
-\treturn rc;
-}}
-/* === END MONITOR MGMT_TX WRAPPER === */
-"""
-        open(cfg_file, "w").write(cfg_txt + wrapper)
-        print(f"[OK] Добавлена обёртка hdd_mon_call_mgmt_tx через {ops_name}")
-
-# 3. Ищем структуру net_device_ops для монитора по всей папке core/hdd
+# 4. В wlan_hdd_main.c будим TX-очередь монитора и шлём кадры в wma_mon_inject_raw_frame
 hdd_dir = os.path.join(root, "core/hdd")
 patterns = [
     re.compile(r'((?:static\s+)?(?:const\s+)?struct\s+net_device_ops\s+\w+\s*=\s*\{[^}]*hdd_mon_open[^}]*\};)', re.S),
@@ -93,7 +228,6 @@ patterns = [
 
 target_file = None
 match = None
-
 for pat in patterns:
     for dirpath, _, filenames in os.walk(hdd_dir):
         for fn in sorted(filenames):
@@ -118,18 +252,15 @@ if not match:
     print("[ERR] Структура net_device_ops для мониторинга не найдена.")
     sys.exit(1)
 
-print(f"[OK] Найдена структура мониторинга в: {target_file}")
 txt = open(target_file).read()
-
 headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n"
 inject_code = r"""
-/* === BEGIN MONITOR TX INJECTION PATCH === */
-extern int hdd_mon_call_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
-				struct cfg80211_mgmt_tx_params *params, u64 *cookie);
+/* === BEGIN MONITOR TX INJECTION PATCH (LOUKIOUS WMI BYPASS) === */
+extern int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32_t freq);
+extern uint32_t hdd_mon_get_saved_freq(void);
 
 static struct sk_buff_head mon_tx_q;
 static struct work_struct mon_tx_work;
-static struct net_device *mon_tx_dev;
 static bool mon_tx_inited;
 static int mon_xmit_log_cnt;
 
@@ -147,25 +278,10 @@ static int hdd_mon_open_hook(struct net_device *dev)
 static void hdd_mon_tx_worker(struct work_struct *work)
 {
 	struct sk_buff *skb;
-	struct net_device *dev = mon_tx_dev;
-	struct wireless_dev *wdev;
-	struct cfg80211_mgmt_tx_params params;
-	u64 cookie = 0;
-
-	if (!dev || !dev->ieee80211_ptr)
-		return;
-	wdev = dev->ieee80211_ptr;
+	uint32_t freq = hdd_mon_get_saved_freq();
 
 	while ((skb = skb_dequeue(&mon_tx_q)) != NULL) {
-		memset(&params, 0, sizeof(params));
-		params.buf = skb->data;
-		params.len = skb->len;
-		params.no_cck = false;
-		params.offchan = true;
-		params.wait = 20;
-		params.dont_wait_for_ack = true;
-		if (wdev->wiphy)
-			hdd_mon_call_mgmt_tx(wdev->wiphy, wdev, &params, &cookie);
+		wma_mon_inject_raw_frame(skb->data, skb->len, freq);
 		dev_kfree_skb_any(skb);
 	}
 }
@@ -199,7 +315,6 @@ static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *d
 	}
 
 	skb_pull(skb, rtap_len);
-	mon_tx_dev = dev;
 	if (skb_queue_len(&mon_tx_q) < 64) {
 		skb_queue_tail(&mon_tx_q, skb);
 		schedule_work(&mon_tx_work);
@@ -220,42 +335,6 @@ new_block = re.sub(r'\.ndo_open\s*=\s*hdd_mon_open\b', '.ndo_open = hdd_mon_open
 
 txt = txt[:match.start()] + inject_code + "\n" + new_block + txt[match.end():]
 
-# 4. Также перехватываем основную wlan_drv_ops
-m_drv = re.search(r'((?:static\s+)?(?:const\s+)?struct\s+net_device_ops\s+wlan_drv_ops\s*=\s*\{[^}]+\};)', txt, re.S)
-if m_drv:
-    drv_blk = m_drv.group(1)
-    m_xmit = re.search(r'\.ndo_start_xmit\s*=\s*(\w+)', drv_blk)
-    m_op = re.search(r'\.ndo_open\s*=\s*(\w+)', drv_blk)
-    if m_xmit and m_op:
-        orig_xmit = m_xmit.group(1)
-        orig_open = m_op.group(1)
-        drv_wrappers = f"""
-static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *dev);
-static netdev_tx_t hdd_mon_or_sta_xmit(struct sk_buff *skb, struct net_device *dev)
-{{
-\tif (dev && dev->ieee80211_ptr &&
-\t    dev->ieee80211_ptr->iftype == NL80211_IFTYPE_MONITOR)
-\t\treturn hdd_mon_inject_xmit(skb, dev);
-\treturn {orig_xmit}(skb, dev);
-}}
-
-static int hdd_mon_or_sta_open(struct net_device *dev)
-{{
-\tint rc = {orig_open}(dev);
-\tif (rc == 0 && dev && dev->ieee80211_ptr &&
-\t    dev->ieee80211_ptr->iftype == NL80211_IFTYPE_MONITOR) {{
-\t\tnetif_carrier_on(dev);
-\t\tnetif_tx_start_all_queues(dev);
-\t\tpr_info("MON_INJ: wlan_drv_ops open woken in monitor mode\\n");
-\t}}
-\treturn rc;
-}}
-"""
-        new_drv_blk = re.sub(r'\.ndo_start_xmit\s*=\s*\w+', '.ndo_start_xmit = hdd_mon_or_sta_xmit', drv_blk, count=1)
-        new_drv_blk = re.sub(r'\.ndo_open\s*=\s*\w+', '.ndo_open = hdd_mon_or_sta_open', new_drv_blk, count=1)
-        txt = txt[:m_drv.start()] + drv_wrappers + "\n" + new_drv_blk + txt[m_drv.end():]
-        print(f"[OK] Перехвачена основная wlan_drv_ops ({orig_open}, {orig_xmit})")
-
 inc_m = re.search(r'^\s*#include\s+.*$', txt, re.M)
 if inc_m:
     txt = txt[:inc_m.end()] + headers + txt[inc_m.end():]
@@ -263,4 +342,4 @@ else:
     txt = headers + txt
 
 open(target_file, "w").write(txt)
-print("[OK] Патч TX-инъекции применён")
+print("[OK] Патч TX-инъекции (@Loukious WMI hidden STA vdev) применён")
