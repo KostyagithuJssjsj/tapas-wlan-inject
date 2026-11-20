@@ -22,9 +22,7 @@ if os.path.exists(cfg_file):
             sys.exit(1)
         ops_name = m_ops.group(1)
 
-        # Пробуем перехватить .set_monitor_channel чтобы знать точный канал (например ch 6 = 2437 МГц)
         m_smc = re.search(r'(\.set_monitor_channel\s*=\s*)(\w+)', cfg_txt)
-        smc_hook_decl = ""
         if m_smc:
             orig_smc = m_smc.group(2)
             smc_hook_decl = f"""
@@ -123,20 +121,6 @@ if not match:
 print(f"[OK] Найдена структура мониторинга в: {target_file}")
 txt = open(target_file).read()
 
-# 4. Будим TX-очередь и carrier в hdd_mon_open, чтобы ядро передавало пакеты в ndo_start_xmit
-m_open = re.search(r'(hdd_mon_open\s*\(\s*struct\s+net_device\s*\*\s*(\w+)\s*\)\s*\{)', txt)
-if m_open:
-    dev_arg = m_open.group(2)
-    # Ищем первый return 0; после hdd_mon_open
-    m_ret = re.search(r'\breturn\s+0\s*;', txt[m_open.end():m_open.end()+2000])
-    if m_ret:
-        pos = m_open.end() + m_ret.start()
-        wake_code = f"netif_carrier_on({dev_arg});\n\tnetif_tx_start_all_queues({dev_arg});\n\tpr_info(\"MON_INJ: hdd_mon_open TX queue woken\\n\");\n\t"
-        txt = txt[:pos] + wake_code + txt[pos:]
-        print(f"[OK] Добавлен netif_tx_start_all_queues({dev_arg}) в hdd_mon_open")
-        # Переищем match после вставки
-        match = re.search(patterns[0], txt) or re.search(patterns[1], txt)
-
 headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n"
 inject_code = r"""
 /* === BEGIN MONITOR TX INJECTION PATCH === */
@@ -148,17 +132,6 @@ static struct work_struct mon_tx_work;
 static struct net_device *mon_tx_dev;
 static bool mon_tx_inited;
 static int mon_xmit_log_cnt;
-
-static int hdd_mon_open_hook(struct net_device *dev)
-{
-	int rc = hdd_mon_open(dev);
-	pr_info("MON_INJ: hdd_mon_open_hook rc=%d\n", rc);
-	if (rc == 0) {
-		netif_carrier_on(dev);
-		netif_tx_start_all_queues(dev);
-	}
-	return rc;
-}
 
 static int hdd_mon_open_hook(struct net_device *dev)
 {
@@ -242,11 +215,10 @@ if ".ndo_start_xmit" in block:
 else:
     new_block = block.replace("{", "{\n\t.ndo_start_xmit = hdd_mon_inject_xmit,", 1)
 new_block = re.sub(r'\.ndo_open\s*=\s*hdd_mon_open\b', '.ndo_open = hdd_mon_open_hook', new_block)
-new_block = re.sub(r'\.ndo_open\s*=\s*hdd_mon_open\b', '.ndo_open = hdd_mon_open_hook', new_block)
 
 txt = txt[:match.start()] + inject_code + "\n" + new_block + txt[match.end():]
 
-# 5. Также перехватываем основную wlan_drv_ops (используется wlan0 при con_mode=4)
+# 4. Также перехватываем основную wlan_drv_ops
 m_drv = re.search(r'((?:static\s+)?(?:const\s+)?struct\s+net_device_ops\s+wlan_drv_ops\s*=\s*\{[^}]+\};)', txt, re.S)
 if m_drv:
     drv_blk = m_drv.group(1)
@@ -255,7 +227,7 @@ if m_drv:
     if m_xmit and m_op:
         orig_xmit = m_xmit.group(1)
         orig_open = m_op.group(1)
-        drv_wrappers = f'''
+        drv_wrappers = f"""
 static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *dev);
 static netdev_tx_t hdd_mon_or_sta_xmit(struct sk_buff *skb, struct net_device *dev)
 {{
@@ -276,15 +248,11 @@ static int hdd_mon_or_sta_open(struct net_device *dev)
 \t}}
 \treturn rc;
 }}
-'''
+"""
         new_drv_blk = re.sub(r'\.ndo_start_xmit\s*=\s*\w+', '.ndo_start_xmit = hdd_mon_or_sta_xmit', drv_blk, count=1)
         new_drv_blk = re.sub(r'\.ndo_open\s*=\s*\w+', '.ndo_open = hdd_mon_or_sta_open', new_drv_blk, count=1)
         txt = txt[:m_drv.start()] + drv_wrappers + "\n" + new_drv_blk + txt[m_drv.end():]
         print(f"[OK] Перехвачена основная wlan_drv_ops ({orig_open}, {orig_xmit})")
-    else:
-        print("[WARN] В wlan_drv_ops не найдены ndo_open/ndo_start_xmit")
-else:
-    print("[WARN] wlan_drv_ops не найдена в " + target_file)
 
 inc_m = re.search(r'^\s*#include\s+.*$', txt, re.M)
 if inc_m:
