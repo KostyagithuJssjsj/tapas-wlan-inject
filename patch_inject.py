@@ -160,7 +160,9 @@ static void hdd_mon_tx_worker(struct work_struct *work)
 		memset(&params, 0, sizeof(params));
 		params.buf = skb->data;
 		params.len = skb->len;
-		params.no_cck = true;
+		params.no_cck = false;
+		params.offchan = true;
+		params.wait = 20;
 		params.dont_wait_for_ack = true;
 		if (wdev->wiphy)
 			hdd_mon_call_mgmt_tx(wdev->wiphy, wdev, &params, &cookie);
@@ -186,7 +188,7 @@ static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *d
 
 	rtap = (struct ieee80211_radiotap_header *)skb->data;
 	rtap_len = le16_to_cpu(rtap->it_len);
-	if (rtap_len > skb->len || skb->len - rtap_len < 10) {
+	if (rtap_len < sizeof(*rtap) || rtap_len > skb->len || skb->len - rtap_len < 10) {
 		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
 	}
