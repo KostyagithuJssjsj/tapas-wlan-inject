@@ -232,6 +232,7 @@ if m_drv:
         orig_xmit = m_xmit.group(1)
         orig_open = m_op.group(1)
         drv_wrappers = f'''
+static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *dev);
 static netdev_tx_t hdd_mon_or_sta_xmit(struct sk_buff *skb, struct net_device *dev)
 {{
 \tif (dev && dev->ieee80211_ptr &&
