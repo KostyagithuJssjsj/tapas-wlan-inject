@@ -73,7 +73,7 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 
 \tif (!wma_mon_inject_vdev_ready) {{
 \t\tqdf_mem_zero(&create_params, sizeof(create_params));
-\t\tcreate_params.{vc_id_field} = vdev_id;
+\t\tcreate_params.vdev_id = vdev_id;
 \t\tcreate_params.type = WMI_VDEV_TYPE_STA;
 \t\tcreate_params.subtype = 0;
 \t\tcreate_params.nss_2g = 1;
@@ -113,7 +113,6 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 \tstart_params.channel.minpower = 0;
 \tstart_params.beacon_interval = 100;
 \tstart_params.dtim_period = 1;
-\tstart_params.max_txpow = 20;
 
 \tpr_info("MON_INJ: starting hidden STA vdev_id=%u freq=%u\\n", vdev_id, freq);
 \tstatus = wmi_unified_vdev_start_send(wma->wmi_handle, &start_params);
