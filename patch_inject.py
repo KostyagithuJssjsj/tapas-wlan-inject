@@ -160,6 +160,17 @@ static int hdd_mon_open_hook(struct net_device *dev)
 	return rc;
 }
 
+static int hdd_mon_open_hook(struct net_device *dev)
+{
+	int rc = hdd_mon_open(dev);
+	pr_info("MON_INJ: hdd_mon_open_hook rc=%d\n", rc);
+	if (rc == 0) {
+		netif_carrier_on(dev);
+		netif_tx_start_all_queues(dev);
+	}
+	return rc;
+}
+
 static void hdd_mon_tx_worker(struct work_struct *work)
 {
 	struct sk_buff *skb;
@@ -230,6 +241,7 @@ if ".ndo_start_xmit" in block:
     new_block = re.sub(r'\.ndo_start_xmit\s*=\s*[^,\n]+', '.ndo_start_xmit = hdd_mon_inject_xmit', block)
 else:
     new_block = block.replace("{", "{\n\t.ndo_start_xmit = hdd_mon_inject_xmit,", 1)
+new_block = re.sub(r'\.ndo_open\s*=\s*hdd_mon_open\b', '.ndo_open = hdd_mon_open_hook', new_block)
 new_block = re.sub(r'\.ndo_open\s*=\s*hdd_mon_open\b', '.ndo_open = hdd_mon_open_hook', new_block)
 
 txt = txt[:match.start()] + inject_code + "\n" + new_block + txt[match.end():]
