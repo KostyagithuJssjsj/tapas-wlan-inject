@@ -155,7 +155,8 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 \t\tqdf_mem_zero(&up_params, sizeof(up_params));
 \t\tup_params.vdev_id = vdev_id;
 \t\tup_params.assoc_id = 1;
-\t\tstatus = wmi_unified_vdev_up_send(wma->wmi_handle, mac, &up_params);
+	/* SKIP VDEV_UP: FW asserts in wlan_vdev_up without BSS peer */
+	(void)up_params;
 \t\tif (QDF_IS_STATUS_ERROR(status))
 \t\t\tpr_warn("MON_INJ: vdev_up failed: %d\\n", status);
 \t\tqdf_mdelay(10);
