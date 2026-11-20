@@ -45,6 +45,7 @@ if os.path.exists(wma_file):
         wma_code = f"""
 /* === BEGIN LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
 #include "wmi_unified_api.h"
+#include "cdp_txrx_cmn.h"
 
 static uint8_t wma_mon_inject_vdev_id = 1;
 static bool wma_mon_inject_vdev_ready;
@@ -183,7 +184,19 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
 \t\t\ttx_params.vdev_id, frame_len, tx_params.chanfreq, status);
 \t}}
 \tif (QDF_IS_STATUS_ERROR(status)) {{
+\t\tvoid *soc = cds_get_context(QDF_MODULE_ID_SOC);
+\t\tint cdp_ret = -EINVAL;
+
 \t\tqdf_nbuf_unmap_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
+\t\tif (soc) {{
+\t\t\tQDF_NBUF_CB_MGMT_TXRX_DESC_ID(nbuf) = tx_params.desc_id;
+\t\t\tcdp_ret = cdp_mgmt_send_ext(soc, tx_params.vdev_id, nbuf,
+\t\t\t\t\t\t    0, 0, tx_params.chanfreq);
+\t\t\tif (wma_mon_inject_log_cnt <= 10)
+\t\t\t\tpr_info("MON_INJ: CDP_MGMT_TX vdev=%u freq=%u ret=%d\\n",
+\t\t\t\t\ttx_params.vdev_id, tx_params.chanfreq, cdp_ret);
+\t\t\treturn cdp_ret;
+\t\t}}
 \t\tqdf_nbuf_free(nbuf);
 \t\treturn -EIO;
 \t}}
