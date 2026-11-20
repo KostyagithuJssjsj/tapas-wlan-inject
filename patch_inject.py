@@ -222,6 +222,45 @@ else:
 
 txt = txt[:match.start()] + inject_code + "\n" + new_block + txt[match.end():]
 
+# 5. Также перехватываем основную wlan_drv_ops (используется wlan0 при con_mode=4)
+m_drv = re.search(r'((?:static\s+)?(?:const\s+)?struct\s+net_device_ops\s+wlan_drv_ops\s*=\s*\{[^}]+\};)', txt, re.S)
+if m_drv:
+    drv_blk = m_drv.group(1)
+    m_xmit = re.search(r'\.ndo_start_xmit\s*=\s*(\w+)', drv_blk)
+    m_op = re.search(r'\.ndo_open\s*=\s*(\w+)', drv_blk)
+    if m_xmit and m_op:
+        orig_xmit = m_xmit.group(1)
+        orig_open = m_op.group(1)
+        drv_wrappers = f'''
+static netdev_tx_t hdd_mon_or_sta_xmit(struct sk_buff *skb, struct net_device *dev)
+{{
+\tif (dev && dev->ieee80211_ptr &&
+\t    dev->ieee80211_ptr->iftype == NL80211_IFTYPE_MONITOR)
+\t\treturn hdd_mon_inject_xmit(skb, dev);
+\treturn {orig_xmit}(skb, dev);
+}}
+
+static int hdd_mon_or_sta_open(struct net_device *dev)
+{{
+\tint rc = {orig_open}(dev);
+\tif (rc == 0 && dev && dev->ieee80211_ptr &&
+\t    dev->ieee80211_ptr->iftype == NL80211_IFTYPE_MONITOR) {{
+\t\tnetif_carrier_on(dev);
+\t\tnetif_tx_start_all_queues(dev);
+\t\tpr_info("MON_INJ: wlan_drv_ops open woken in monitor mode\\n");
+\t}}
+\treturn rc;
+}}
+'''
+        new_drv_blk = re.sub(r'\.ndo_start_xmit\s*=\s*\w+', '.ndo_start_xmit = hdd_mon_or_sta_xmit', drv_blk, count=1)
+        new_drv_blk = re.sub(r'\.ndo_open\s*=\s*\w+', '.ndo_open = hdd_mon_or_sta_open', new_drv_blk, count=1)
+        txt = txt[:m_drv.start()] + drv_wrappers + "\n" + new_drv_blk + txt[m_drv.end():]
+        print(f"[OK] Перехвачена основная wlan_drv_ops ({orig_open}, {orig_xmit})")
+    else:
+        print("[WARN] В wlan_drv_ops не найдены ndo_open/ndo_start_xmit")
+else:
+    print("[WARN] wlan_drv_ops не найдена в " + target_file)
+
 inc_m = re.search(r'^\s*#include\s+.*$', txt, re.M)
 if inc_m:
     txt = txt[:inc_m.end()] + headers + txt[inc_m.end():]
