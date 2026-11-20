@@ -26,7 +26,16 @@ else:
 
 m_vc = re.search(r'struct\s+vdev_create_params\s*\{([^}]+)\}', wmi_api_txt, re.S)
 vc_id_field = "vdev_id" if (m_vc and "vdev_id" in m_vc.group(1)) else "if_id"
-print(f"[INFO] WMI API: {mgmt_send_fn}, vdev_create_params.{vc_id_field}")
+cf1_field = "cfreq1"
+for dp, _, fns in os.walk(os.path.join(root, "cmn")):
+    for fn in fns:
+        if fn.endswith(".h"):
+            t = open(os.path.join(dp, fn), errors="ignore").read()
+            m_ch = re.search(r'struct\s+mlme_channel_param\s*\{([^}]+)\}', t, re.S)
+            if m_ch:
+                cf1_field = "band_center_freq1" if "band_center_freq1" in m_ch.group(1) else "cfreq1"
+                break
+print(f"[INFO] WMI API: {mgmt_send_fn}, vdev_create_params.{vc_id_field}, mlme_channel_param.{cf1_field}")
 
 # 2. В core/wma/src/wma_dev_if.c добавляем обход @Loukious (hidden STA vdev + self-peer + WMI_MGMT_TX)
 wma_file = os.path.join(root, "core/wma/src/wma_dev_if.c")
@@ -97,13 +106,12 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 \tqdf_mem_zero(&start_params, sizeof(start_params));
 \tstart_params.vdev_id = vdev_id;
 \tstart_params.channel.mhz = freq;
-\tstart_params.channel.band_center_freq1 = freq;
-\tstart_params.channel.band_center_freq2 = 0;
-\tstart_params.channel.phy_mode = (freq < 5000) ? WMI_HOST_MODE_11G : WMI_HOST_MODE_11A;
+\tstart_params.channel.{cf1_field} = freq;
+\t\tstart_params.channel.phy_mode = (freq < 5000) ? WMI_HOST_MODE_11G : WMI_HOST_MODE_11A;
 \tstart_params.channel.maxregpower = 20;
 \tstart_params.channel.maxpower = 20;
 \tstart_params.channel.minpower = 0;
-\tstart_params.beacon_intval = 100;
+\tstart_params.beacon_interval = 100;
 \tstart_params.dtim_period = 1;
 \tstart_params.max_txpow = 20;
 
