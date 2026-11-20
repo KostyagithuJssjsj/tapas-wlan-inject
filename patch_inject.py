@@ -63,6 +63,7 @@ else:
 				pr_info("MON_INJ: cdp_vdev_attach vdev=%u st=%d\n", vdev_id, cdp_vdev_attach(cdp_soc, 0, mac, vdev_id, wlan_op_mode_sta));
 		}"""
 print(f"[INFO] cdp_uses_vdev_info={cdp_uses_vdev_info}")
+cdp_attach_code = ""
 
 # 2. В core/wma/src/wma_dev_if.c добавляем обход @Loukious (hidden STA vdev + self-peer + WMI_MGMT_TX)
 wma_file = os.path.join(root, "core/wma/src/wma_dev_if.c")
@@ -76,6 +77,7 @@ if os.path.exists(wma_file):
 
 static uint8_t wma_mon_inject_vdev_id = 1;
 static bool wma_mon_inject_vdev_ready;
+void wma_mon_inject_reset(void) {{ wma_mon_inject_vdev_ready = false; }}
 static uint32_t wma_mon_inject_last_freq;
 static int wma_mon_inject_log_cnt;
 static uint16_t wma_mon_desc_id;
@@ -307,6 +309,7 @@ inject_code = r"""
 /* === BEGIN MONITOR TX INJECTION PATCH (LOUKIOUS WMI BYPASS) === */
 extern int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32_t freq);
 extern uint32_t hdd_mon_get_saved_freq(void);
+extern void wma_mon_inject_reset(void);
 
 static struct sk_buff_head mon_tx_q;
 static struct work_struct mon_tx_work;
@@ -381,6 +384,22 @@ if ".ndo_start_xmit" in block:
 else:
     new_block = block.replace("{", "{\n\t.ndo_start_xmit = hdd_mon_inject_xmit,", 1)
 new_block = re.sub(r'\.ndo_open\s*=\s*hdd_mon_open\b', '.ndo_open = hdd_mon_open_hook', new_block)
+m_stop = re.search(r'\.ndo_stop\s*=\s*(\w+)', new_block)
+if m_stop and "hdd_mon_stop_hook" not in inject_code:
+    orig_stop = m_stop.group(1)
+    inject_code += f'''
+static int hdd_mon_stop_hook(struct net_device *dev)
+{{
+	if (mon_tx_inited) {{
+		cancel_work_sync(&mon_tx_work);
+		skb_queue_purge(&mon_tx_q);
+	}}
+	wma_mon_inject_reset();
+	return {orig_stop}(dev);
+}}
+'''
+    new_block = re.sub(r'\.ndo_stop\s*=\s*' + orig_stop + r'\b', '.ndo_stop = hdd_mon_stop_hook', new_block)
+
 
 txt = txt[:match.start()] + inject_code + "\n" + new_block + txt[match.end():]
 
