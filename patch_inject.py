@@ -36,6 +36,33 @@ for dp, _, fns in os.walk(os.path.join(root, "cmn")):
                 cf1_field = "band_center_freq1" if "band_center_freq1" in m_ch.group(1) else "cfreq1"
                 break
 print(f"[INFO] WMI API: {mgmt_send_fn}, vdev_create_params.{vc_id_field}, mlme_channel_param.{cf1_field}")
+cdp_uses_vdev_info = False
+for dp, _, fns in os.walk(os.path.join(root, "cmn/dp/inc")):
+    for fn in fns:
+        if fn.endswith(".h"):
+            t = open(os.path.join(dp, fn), errors="ignore").read()
+            if "cdp_vdev_attach" in t and "cdp_vdev_info" in t:
+                cdp_uses_vdev_info = True
+                break
+if cdp_uses_vdev_info:
+    cdp_attach_code = """		{
+			void *cdp_soc = cds_get_context(QDF_MODULE_ID_SOC);
+			struct cdp_vdev_info vi;
+			if (cdp_soc) {
+				qdf_mem_zero(&vi, sizeof(vi));
+				vi.vdev_mac_addr = mac;
+				vi.vdev_id = vdev_id;
+				vi.op_mode = wlan_op_mode_sta;
+				pr_info("MON_INJ: cdp_vdev_attach(vi) vdev=%u st=%d\n", vdev_id, cdp_vdev_attach(cdp_soc, 0, &vi));
+			}
+		}"""
+else:
+    cdp_attach_code = """		{
+			void *cdp_soc = cds_get_context(QDF_MODULE_ID_SOC);
+			if (cdp_soc)
+				pr_info("MON_INJ: cdp_vdev_attach vdev=%u st=%d\n", vdev_id, cdp_vdev_attach(cdp_soc, 0, mac, vdev_id, wlan_op_mode_sta));
+		}"""
+print(f"[INFO] cdp_uses_vdev_info={cdp_uses_vdev_info}")
 
 # 2. В core/wma/src/wma_dev_if.c добавляем обход @Loukious (hidden STA vdev + self-peer + WMI_MGMT_TX)
 wma_file = os.path.join(root, "core/wma/src/wma_dev_if.c")
@@ -96,7 +123,8 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 \t\tif (QDF_IS_STATUS_ERROR(status))
 \t\t\tpr_warn("MON_INJ: self-peer create failed: %d\\n", status);
 
-\t\tqdf_mdelay(15);
+{cdp_attach_code}
+		qdf_mdelay(15);
 \t}} else {{
 \t\tpr_info("MON_INJ: channel change %u -> %u on vdev_id=%u\\n",
 \t\t\twma_mon_inject_last_freq, freq, vdev_id);
