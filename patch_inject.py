@@ -45,7 +45,7 @@ for dp, _, fns in os.walk(os.path.join(root, "cmn/dp/inc")):
                 cdp_uses_vdev_info = True
                 break
 if cdp_uses_vdev_info:
-    cdp_attach_code = """		{
+    cdp_attach_code = r"""		{
 			void *cdp_soc = cds_get_context(QDF_MODULE_ID_SOC);
 			struct cdp_vdev_info vi;
 			if (cdp_soc) {
@@ -57,7 +57,7 @@ if cdp_uses_vdev_info:
 			}
 		}"""
 else:
-    cdp_attach_code = """		{
+    cdp_attach_code = r"""		{
 			void *cdp_soc = cds_get_context(QDF_MODULE_ID_SOC);
 			if (cdp_soc)
 				pr_info("MON_INJ: cdp_vdev_attach vdev=%u st=%d\n", vdev_id, cdp_vdev_attach(cdp_soc, 0, mac, vdev_id, wlan_op_mode_sta));
