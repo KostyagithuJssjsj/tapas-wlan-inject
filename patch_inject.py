@@ -73,6 +73,7 @@ if os.path.exists(wma_file):
         wma_code = f"""
 /* === BEGIN LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
 #include <linux/spinlock.h>
+#include <linux/jiffies.h>
 #include "wmi_unified_api.h"
 
 #define MON_INJ_DESC_MAGIC 0xE000U
@@ -87,6 +88,7 @@ static int wma_mon_inject_err_cnt;
 static uint32_t wma_mon_desc_cursor;
 static DEFINE_SPINLOCK(wma_mon_nbuf_lock);
 static qdf_nbuf_t wma_mon_nbufs[MON_INJ_DESC_SLOTS];
+static unsigned long wma_mon_nbuf_ts[MON_INJ_DESC_SLOTS];
 
 bool wma_mon_inject_handle_compl(tp_wma_handle wma, uint32_t desc_id)
 {{
@@ -229,7 +231,7 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
 {{
 	tp_wma_handle wma;
 	struct wmi_mgmt_params tx_params;
-	qdf_nbuf_t nbuf;
+	qdf_nbuf_t nbuf, stale_nbuf = NULL;
 	QDF_STATUS status;
 	unsigned long flags;
 	uint32_t i, slot = MON_INJ_DESC_SLOTS;
@@ -260,12 +262,31 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
 		uint32_t cand = (wma_mon_desc_cursor + i) & MON_INJ_DESC_MASK;
 		if (!wma_mon_nbufs[cand]) {{
 			wma_mon_nbufs[cand] = nbuf;
+			wma_mon_nbuf_ts[cand] = jiffies;
 			wma_mon_desc_cursor = (cand + 1U) & MON_INJ_DESC_MASK;
 			slot = cand;
 			break;
 		}}
 	}}
+	if (slot >= MON_INJ_DESC_SLOTS) {{
+		for (i = 0; i < MON_INJ_DESC_SLOTS; i++) {{
+			uint32_t cand = (wma_mon_desc_cursor + i) & MON_INJ_DESC_MASK;
+			if (wma_mon_nbufs[cand] && time_after(jiffies, wma_mon_nbuf_ts[cand] + 2 * HZ)) {{
+				stale_nbuf = wma_mon_nbufs[cand];
+				wma_mon_nbufs[cand] = nbuf;
+				wma_mon_nbuf_ts[cand] = jiffies;
+				wma_mon_desc_cursor = (cand + 1U) & MON_INJ_DESC_MASK;
+				slot = cand;
+				break;
+			}}
+		}}
+	}}
 	spin_unlock_irqrestore(&wma_mon_nbuf_lock, flags);
+
+	if (stale_nbuf) {{
+		qdf_nbuf_unmap_single(wma->qdf_dev, stale_nbuf, QDF_DMA_TO_DEVICE);
+		qdf_nbuf_free(stale_nbuf);
+	}}
 
 	if (slot >= MON_INJ_DESC_SLOTS) {{
 		qdf_nbuf_unmap_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
