@@ -72,15 +72,70 @@ if os.path.exists(wma_file):
     if "wma_mon_inject_raw_frame" not in wma_txt:
         wma_code = f"""
 /* === BEGIN LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
+#include <linux/spinlock.h>
 #include "wmi_unified_api.h"
-#include "cdp_txrx_cmn.h"
+
+#define MON_INJ_DESC_MAGIC 0xE000U
+#define MON_INJ_DESC_SLOTS 64U
+#define MON_INJ_DESC_MASK  (MON_INJ_DESC_SLOTS - 1U)
 
 static uint8_t wma_mon_inject_vdev_id = 1;
 static bool wma_mon_inject_vdev_ready;
-void wma_mon_inject_reset(void) {{ wma_mon_inject_vdev_ready = false; }}
 static uint32_t wma_mon_inject_last_freq;
 static int wma_mon_inject_log_cnt;
-static uint16_t wma_mon_desc_id;
+static int wma_mon_inject_err_cnt;
+static uint32_t wma_mon_desc_cursor;
+static DEFINE_SPINLOCK(wma_mon_nbuf_lock);
+static qdf_nbuf_t wma_mon_nbufs[MON_INJ_DESC_SLOTS];
+
+bool wma_mon_inject_handle_compl(tp_wma_handle wma, uint32_t desc_id)
+{{
+	unsigned long flags;
+	qdf_nbuf_t nbuf = NULL;
+	uint32_t slot;
+
+	if ((desc_id & ~MON_INJ_DESC_MASK) != MON_INJ_DESC_MAGIC)
+		return false;
+
+	slot = desc_id & MON_INJ_DESC_MASK;
+	spin_lock_irqsave(&wma_mon_nbuf_lock, flags);
+	nbuf = wma_mon_nbufs[slot];
+	wma_mon_nbufs[slot] = NULL;
+	spin_unlock_irqrestore(&wma_mon_nbuf_lock, flags);
+
+	if (nbuf) {{
+		if (wma && wma->qdf_dev)
+			qdf_nbuf_unmap_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
+		qdf_nbuf_free(nbuf);
+	}}
+	return true;
+}}
+
+void wma_mon_inject_reset(void)
+{{
+	tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
+	unsigned long flags;
+	qdf_nbuf_t leftover[MON_INJ_DESC_SLOTS];
+	uint32_t i;
+
+	wma_mon_inject_vdev_ready = false;
+	qdf_mdelay(20);
+
+	spin_lock_irqsave(&wma_mon_nbuf_lock, flags);
+	for (i = 0; i < MON_INJ_DESC_SLOTS; i++) {{
+		leftover[i] = wma_mon_nbufs[i];
+		wma_mon_nbufs[i] = NULL;
+	}}
+	spin_unlock_irqrestore(&wma_mon_nbuf_lock, flags);
+
+	for (i = 0; i < MON_INJ_DESC_SLOTS; i++) {{
+		if (leftover[i]) {{
+			if (wma && wma->qdf_dev)
+				qdf_nbuf_unmap_single(wma->qdf_dev, leftover[i], QDF_DMA_TO_DEVICE);
+			qdf_nbuf_free(leftover[i]);
+		}}
+	}}
+}}
 
 static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 {{
@@ -172,71 +227,116 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 
 int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32_t freq)
 {{
-\ttp_wma_handle wma;
-\tstruct wmi_mgmt_params tx_params;
-\tqdf_nbuf_t nbuf;
-\tQDF_STATUS status;
+	tp_wma_handle wma;
+	struct wmi_mgmt_params tx_params;
+	qdf_nbuf_t nbuf;
+	QDF_STATUS status;
+	unsigned long flags;
+	uint32_t i, slot = MON_INJ_DESC_SLOTS;
 
-\twma = cds_get_context(QDF_MODULE_ID_WMA);
-\tif (!wma || !wma->wmi_handle || !frame_data || frame_len < 10)
-\t\treturn -EINVAL;
+	wma = cds_get_context(QDF_MODULE_ID_WMA);
+	if (!wma || !wma->wmi_handle || !frame_data || frame_len < 10)
+		return -EINVAL;
 
-\tstatus = wma_create_mon_inject_vdev(wma, freq);
-\tif (QDF_IS_STATUS_ERROR(status))
-\t\treturn -EIO;
+	status = wma_create_mon_inject_vdev(wma, freq);
+	if (QDF_IS_STATUS_ERROR(status))
+		return -EIO;
 
-\tnbuf = qdf_nbuf_alloc(NULL, frame_len + 64, 32, 4, false);
-\tif (!nbuf)
-\t\treturn -ENOMEM;
+	nbuf = qdf_nbuf_alloc(NULL, frame_len + 64, 32, 4, false);
+	if (!nbuf)
+		return -ENOMEM;
 
-\tqdf_nbuf_put_tail(nbuf, frame_len);
-\tqdf_mem_copy(qdf_nbuf_data(nbuf), frame_data, frame_len);
+	qdf_nbuf_put_tail(nbuf, frame_len);
+	qdf_mem_copy(qdf_nbuf_data(nbuf), frame_data, frame_len);
 
-\tstatus = qdf_nbuf_map_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
-\tif (QDF_IS_STATUS_ERROR(status)) {{
-\t\tqdf_nbuf_free(nbuf);
-\t\treturn -EIO;
-\t}}
+	status = qdf_nbuf_map_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
+	if (QDF_IS_STATUS_ERROR(status)) {{
+		qdf_nbuf_free(nbuf);
+		return -EIO;
+	}}
 
-\tqdf_mem_zero(&tx_params, sizeof(tx_params));
-\ttx_params.vdev_id = wma_mon_inject_vdev_id;
-\ttx_params.tx_frame = nbuf;
-\ttx_params.frm_len = frame_len;
-\ttx_params.qdf_ctx = wma->qdf_dev;
-\ttx_params.chanfreq = freq ? freq : 2412;
-\ttx_params.desc_id = (++wma_mon_desc_id) & 0x3f;
-\ttx_params.pdata = qdf_nbuf_data(nbuf);
-\ttx_params.tx_flags = 0;
+	spin_lock_irqsave(&wma_mon_nbuf_lock, flags);
+	for (i = 0; i < MON_INJ_DESC_SLOTS; i++) {{
+		uint32_t cand = (wma_mon_desc_cursor + i) & MON_INJ_DESC_MASK;
+		if (!wma_mon_nbufs[cand]) {{
+			wma_mon_nbufs[cand] = nbuf;
+			wma_mon_desc_cursor = (cand + 1U) & MON_INJ_DESC_MASK;
+			slot = cand;
+			break;
+		}}
+	}}
+	spin_unlock_irqrestore(&wma_mon_nbuf_lock, flags);
 
-\tstatus = {mgmt_send_fn}(wma->wmi_handle, &tx_params);
-\tif (wma_mon_inject_log_cnt < 10) {{
-\t\twma_mon_inject_log_cnt++;
-\t\tpr_info("MON_INJ: WMI_MGMT_TX vdev=%u len=%zu freq=%u status=%d\\n",
-\t\t\ttx_params.vdev_id, frame_len, tx_params.chanfreq, status);
-\t}}
-\tif (QDF_IS_STATUS_ERROR(status)) {{
-\t\tvoid *soc = cds_get_context(QDF_MODULE_ID_SOC);
-\t\tint cdp_ret = -EINVAL;
+	if (slot >= MON_INJ_DESC_SLOTS) {{
+		qdf_nbuf_unmap_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
+		qdf_nbuf_free(nbuf);
+		return -EBUSY;
+	}}
 
-\t\tqdf_nbuf_unmap_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
-\t\tif (soc) {{
-\t\t\tQDF_NBUF_CB_MGMT_TXRX_DESC_ID(nbuf) = tx_params.desc_id;
-\t\t\tcdp_ret = cdp_mgmt_send_ext(soc, tx_params.vdev_id, nbuf,
-\t\t\t\t\t\t    0, 0, tx_params.chanfreq);
-\t\t\tif (wma_mon_inject_log_cnt <= 10)
-\t\t\t\tpr_info("MON_INJ: CDP_MGMT_TX vdev=%u freq=%u ret=%d\\n",
-\t\t\t\t\ttx_params.vdev_id, tx_params.chanfreq, cdp_ret);
-\t\t\treturn cdp_ret;
-\t\t}}
-\t\tqdf_nbuf_free(nbuf);
-\t\treturn -EIO;
-\t}}
-\treturn 0;
+	qdf_mem_zero(&tx_params, sizeof(tx_params));
+	tx_params.vdev_id = wma_mon_inject_vdev_id;
+	tx_params.tx_frame = nbuf;
+	tx_params.frm_len = frame_len;
+	tx_params.qdf_ctx = wma->qdf_dev;
+	tx_params.chanfreq = freq ? freq : 2412;
+	tx_params.desc_id = MON_INJ_DESC_MAGIC | slot;
+	tx_params.pdata = qdf_nbuf_data(nbuf);
+	tx_params.tx_flags = 0;
+
+	status = {mgmt_send_fn}(wma->wmi_handle, &tx_params);
+	if (wma_mon_inject_log_cnt < 10) {{
+		wma_mon_inject_log_cnt++;
+		pr_info("MON_INJ: WMI_MGMT_TX vdev=%u len=%zu freq=%u desc=0x%x status=%d\n",
+			tx_params.vdev_id, frame_len, tx_params.chanfreq, tx_params.desc_id, status);
+	}}
+	if (QDF_IS_STATUS_ERROR(status)) {{
+		qdf_nbuf_t to_free = NULL;
+		spin_lock_irqsave(&wma_mon_nbuf_lock, flags);
+		if (wma_mon_nbufs[slot] == nbuf) {{
+			to_free = nbuf;
+			wma_mon_nbufs[slot] = NULL;
+		}}
+		spin_unlock_irqrestore(&wma_mon_nbuf_lock, flags);
+		if (to_free) {{
+			qdf_nbuf_unmap_single(wma->qdf_dev, to_free, QDF_DMA_TO_DEVICE);
+			qdf_nbuf_free(to_free);
+		}}
+		if (wma_mon_inject_err_cnt < 10) {{
+			wma_mon_inject_err_cnt++;
+			pr_warn("MON_INJ: WMI_MGMT_TX err=%d\n", status);
+		}}
+		return -EIO;
+	}}
+	return 0;
 }}
 /* === END LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
 """
         open(wma_file, "w").write(wma_txt + wma_code)
         print("[OK] Добавлен обход @Loukious (hidden STA vdev) в wma_dev_if.c")
+
+# 2b. Перехватываем completion наших desc_id (0xE000..0xE03F) в wma_mgmt.c
+wma_src_dir = os.path.join(root, "core/wma/src")
+if os.path.isdir(wma_src_dir):
+    for fn in sorted(os.listdir(wma_src_dir)):
+        if not fn.endswith(".c") or fn == "wma_dev_if.c":
+            continue
+        fp = os.path.join(wma_src_dir, fn)
+        t = open(fp, errors="ignore").read()
+        m = re.search(r'((?:static\s+)?int\s+wma_process_mgmt_tx_completion\s*\(([^)]+)\)\s*\{)', t, re.S)
+        if not m or "wma_mon_inject_handle_compl" in t:
+            continue
+        ps = [x.strip() for x in m.group(2).split(",")]
+        wma_v = re.findall(r'\b(\w+)\b', ps[0])[-1]
+        desc_v = re.findall(r'\b(\w+)\b', ps[1])[-1]
+        m_st = re.search(r'\n([ \t]+)(if\s*\(|pdev\s*=|status\s*=|wma_debug)', t[m.end():m.end()+1500])
+        if m_st:
+            ind = m_st.group(1)
+            pos = m.end() + m_st.start()
+            ext = "\nextern bool wma_mon_inject_handle_compl(tp_wma_handle wma, uint32_t desc_id);\n"
+            chk = f"\n{ind}if (wma_mon_inject_handle_compl({wma_v}, {desc_v}))\n{ind}\treturn 0;\n"
+            open(fp, "w").write(t[:m.start()] + ext + t[m.start():pos] + chk + t[pos:])
+            print(f"[OK] Перехвачен wma_process_mgmt_tx_completion в {fn} ({wma_v}, {desc_v})")
+            break
 
 # 3. В wlan_hdd_cfg80211.c перехватываем set_monitor_channel и экспортируем частоту
 cfg_file = os.path.join(root, "core/hdd/src/wlan_hdd_cfg80211.c")
@@ -367,7 +467,7 @@ static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *d
 	}
 
 	skb_pull(skb, rtap_len);
-	if (skb_queue_len(&mon_tx_q) < 64) {
+	if (skb_queue_len(&mon_tx_q) < 256) {
 		skb_queue_tail(&mon_tx_q, skb);
 		schedule_work(&mon_tx_work);
 	} else {
