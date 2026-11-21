@@ -499,6 +499,7 @@ extern uint32_t hdd_mon_get_saved_cfreq1(void);
 extern int hdd_mon_get_saved_width(void);
 extern void wma_mon_inject_reset(void);
 extern void wma_mon_inject_set_mac(const uint8_t *mac);
+extern void wlan_hdd_cfg80211_abort_scan(struct wiphy *wiphy, struct wireless_dev *wdev);
 
 static struct sk_buff_head mon_tx_q;
 static struct work_struct mon_tx_work;
@@ -530,12 +531,8 @@ static int hdd_mon_open_hook(struct net_device *dev)
         if (rc == 0) {
                 if (hdd_ctx)
                         hdd_psoc_idle_timer_stop(hdd_ctx);
-                if (wdev && wdev->wiphy && wdev->wiphy->ops) {
-                        if (wdev->wiphy->ops->abort_scan)
-                                wdev->wiphy->ops->abort_scan(wdev->wiphy, wdev);
-                        if (wdev->wiphy->ops->set_power_mgmt)
-                                wdev->wiphy->ops->set_power_mgmt(wdev->wiphy, dev, false, -1);
-                }
+                if (wdev && wdev->wiphy)
+                        wlan_hdd_cfg80211_abort_scan(wdev->wiphy, wdev);
                 netif_carrier_on(dev);
                 netif_tx_start_all_queues(dev);
         }
