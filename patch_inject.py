@@ -35,7 +35,7 @@ for dp, _, fns in os.walk(os.path.join(root, "cmn")):
             if m_ch:
                 cf1_field = "band_center_freq1" if "band_center_freq1" in m_ch.group(1) else "cfreq1"
                 break
-print(f"[INFO] WMI API: {mgmt_send_fn}, vdev_create_params.{vc_id_field}, mlme_channel_param.{cf1_field}")
+print(f"[INFO] WMI API: {mgmt_send_fn}, vdev_create_params.vdev_id, mlme_channel_param.{cf1_field}")
 cdp_uses_vdev_info = False
 for dp, _, fns in os.walk(os.path.join(root, "cmn/dp/inc")):
     for fn in fns:
@@ -172,7 +172,7 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 
     if (!wma_mon_inject_vdev_ready) {{
         qdf_mem_zero(&create_params, sizeof(create_params));
-        create_params.{vc_id_field} = vdev_id;
+        create_params.vdev_id = vdev_id;
         create_params.type = WMI_VDEV_TYPE_STA;
         create_params.subtype = 0;
         create_params.nss_2g = 1;
