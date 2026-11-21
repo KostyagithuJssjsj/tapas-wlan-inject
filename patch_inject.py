@@ -167,7 +167,7 @@ static uint32_t wma_mon_pick_phy_mode(uint32_t freq, uint32_t cfreq1, int width)
 {{
     if (freq < 5000) {{
         if (width == NL80211_CHAN_WIDTH_40)
-            return (cfreq1 > freq) ? WMI_HOST_MODE_11NG_HT40PLUS : WMI_HOST_MODE_11NG_HT40MINUS;
+            return (cfreq1 > freq) ? WMI_HOST_MODE_11NG_HT40 : WMI_HOST_MODE_11NG_HT40;
         if (width == NL80211_CHAN_WIDTH_20)
             return WMI_HOST_MODE_11NG_HT20;
         return WMI_HOST_MODE_11G;
@@ -175,7 +175,7 @@ static uint32_t wma_mon_pick_phy_mode(uint32_t freq, uint32_t cfreq1, int width)
     if (width == NL80211_CHAN_WIDTH_80)
         return WMI_HOST_MODE_11AC_VHT80;
     if (width == NL80211_CHAN_WIDTH_40)
-        return (cfreq1 > freq) ? WMI_HOST_MODE_11NA_HT40PLUS : WMI_HOST_MODE_11NA_HT40MINUS;
+        return (cfreq1 > freq) ? WMI_HOST_MODE_11NA_HT40 : WMI_HOST_MODE_11NA_HT40;
     if (width == NL80211_CHAN_WIDTH_20)
         return WMI_HOST_MODE_11NA_HT20;
     return WMI_HOST_MODE_11A;
