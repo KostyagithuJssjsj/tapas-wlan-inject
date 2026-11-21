@@ -436,12 +436,12 @@ static int hdd_mon_set_chan_hook(struct wiphy *wiphy, struct cfg80211_chan_def *
         mon_saved_freq = chandef->chan->center_freq;
         mon_saved_cfreq1 = chandef->center_freq1 ? chandef->center_freq1 : mon_saved_freq;
         mon_saved_width = (int)chandef->width;
-        pr_info("MON_INJ: set_monitor_channel freq=%u cf1=%u width=%d\n",
+        pr_info("MON_INJ: set_monitor_channel freq=%u cf1=%u width=%d\\n",
                 mon_saved_freq, mon_saved_cfreq1, mon_saved_width);
     }}
     rc = {orig_smc}(wiphy, chandef);
     if (rc == -EBUSY || rc == -EOPNOTSUPP) {{
-        pr_info("MON_INJ: orig set_monitor_channel rc=%d -> override 0\n", rc);
+        pr_info("MON_INJ: orig set_monitor_channel rc=%d -> override 0\\n", rc);
         return 0;
     }}
     return rc;
