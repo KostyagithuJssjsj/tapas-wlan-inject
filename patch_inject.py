@@ -286,7 +286,7 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
 	status = {mgmt_send_fn}(wma->wmi_handle, &tx_params);
 	if (wma_mon_inject_log_cnt < 10) {{
 		wma_mon_inject_log_cnt++;
-		pr_info("MON_INJ: WMI_MGMT_TX vdev=%u len=%zu freq=%u desc=0x%x status=%d\n",
+		pr_info("MON_INJ: WMI_MGMT_TX vdev=%u len=%zu freq=%u desc=0x%x status=%d\\n",
 			tx_params.vdev_id, frame_len, tx_params.chanfreq, tx_params.desc_id, status);
 	}}
 	if (QDF_IS_STATUS_ERROR(status)) {{
@@ -303,7 +303,7 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
 		}}
 		if (wma_mon_inject_err_cnt < 10) {{
 			wma_mon_inject_err_cnt++;
-			pr_warn("MON_INJ: WMI_MGMT_TX err=%d\n", status);
+			pr_warn("MON_INJ: WMI_MGMT_TX err=%d\\n", status);
 		}}
 		return -EIO;
 	}}
