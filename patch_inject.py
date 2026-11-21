@@ -257,12 +257,6 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
     qdf_nbuf_put_tail(nbuf, frame_len);
     qdf_mem_copy(qdf_nbuf_data(nbuf), frame_data, frame_len);
 
-    status = qdf_nbuf_map_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
-    if (QDF_IS_STATUS_ERROR(status)) {{
-        qdf_nbuf_free(nbuf);
-        return -EIO;
-    }}
-
     spin_lock_irqsave(&wma_mon_nbuf_lock, flags);
     for (i = 0; i < MON_INJ_DESC_SLOTS; i++) {{
         uint32_t cand = (wma_mon_desc_cursor + i) & MON_INJ_DESC_MASK;
@@ -300,7 +294,6 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
     }}
 
     if (slot >= MON_INJ_DESC_SLOTS) {{
-        qdf_nbuf_unmap_single(wma->qdf_dev, nbuf, QDF_DMA_TO_DEVICE);
         qdf_nbuf_free(nbuf);
         return -EBUSY;
     }}
@@ -334,7 +327,8 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
     spin_unlock_irqrestore(&wma_mon_nbuf_lock, flags);
 
     if (to_free) {{
-        qdf_nbuf_unmap_single(wma->qdf_dev, to_free, QDF_DMA_TO_DEVICE);
+        if (!QDF_IS_STATUS_ERROR(status))
+            qdf_nbuf_unmap_single(wma->qdf_dev, to_free, QDF_DMA_TO_DEVICE);
         qdf_nbuf_free(to_free);
     }}
 
