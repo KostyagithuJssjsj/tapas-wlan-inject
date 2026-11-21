@@ -74,6 +74,7 @@ if os.path.exists(wma_file):
 /* === BEGIN LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
 #include <linux/spinlock.h>
 #include <linux/jiffies.h>
+#include <linux/nl80211.h>
 #include "wmi_unified_api.h"
 
 #define MON_INJ_DESC_MAGIC 0xE000U
@@ -82,8 +83,11 @@ if os.path.exists(wma_file):
 #define MON_INJ_VDEV_REFRESH_PERIOD 20000U
 
 static uint8_t wma_mon_inject_vdev_id = 1;
+static uint8_t wma_mon_inject_mac[6] = {{0x02, 0x00, 0x00, 0x11, 0x22, 0x33}};
 static bool wma_mon_inject_vdev_ready;
 static uint32_t wma_mon_inject_last_freq;
+static uint32_t wma_mon_inject_last_cfreq1;
+static int wma_mon_inject_last_width = -1;
 static int wma_mon_inject_log_cnt;
 static int wma_mon_inject_err_cnt;
 static uint32_t wma_mon_desc_cursor;
@@ -93,6 +97,12 @@ static qdf_nbuf_t wma_mon_nbufs[MON_INJ_DESC_SLOTS];
 static unsigned long wma_mon_nbuf_ts[MON_INJ_DESC_SLOTS];
 static bool wma_mon_in_send[MON_INJ_DESC_SLOTS];
 static bool wma_mon_compl_pending[MON_INJ_DESC_SLOTS];
+
+void wma_mon_inject_set_mac(const uint8_t *mac)
+{{
+    if (mac)
+        qdf_mem_copy(wma_mon_inject_mac, mac, 6);
+}}
 
 bool wma_mon_inject_handle_compl(tp_wma_handle wma, uint32_t desc_id)
 {{
@@ -132,6 +142,7 @@ void wma_mon_inject_reset(void)
 
     wma_mon_inject_vdev_ready = false;
     wma_mon_frames_since_refresh = 0;
+    wma_mon_inject_last_width = -1;
     qdf_mdelay(20);
 
     spin_lock_irqsave(&wma_mon_nbuf_lock, flags);
@@ -152,12 +163,29 @@ void wma_mon_inject_reset(void)
     }}
 }}
 
-static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
+static uint32_t wma_mon_pick_phy_mode(uint32_t freq, uint32_t cfreq1, int width)
+{{
+    if (freq < 5000) {{
+        if (width == NL80211_CHAN_WIDTH_40)
+            return (cfreq1 > freq) ? WMI_HOST_MODE_11NG_HT40PLUS : WMI_HOST_MODE_11NG_HT40MINUS;
+        if (width == NL80211_CHAN_WIDTH_20)
+            return WMI_HOST_MODE_11NG_HT20;
+        return WMI_HOST_MODE_11G;
+    }}
+    if (width == NL80211_CHAN_WIDTH_80)
+        return WMI_HOST_MODE_11AC_VHT80;
+    if (width == NL80211_CHAN_WIDTH_40)
+        return (cfreq1 > freq) ? WMI_HOST_MODE_11NA_HT40PLUS : WMI_HOST_MODE_11NA_HT40MINUS;
+    if (width == NL80211_CHAN_WIDTH_20)
+        return WMI_HOST_MODE_11NA_HT20;
+    return WMI_HOST_MODE_11A;
+}}
+
+static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq, uint32_t cfreq1, int width)
 {{
     struct vdev_create_params create_params;
     struct vdev_start_params start_params;
     struct peer_create_params peer_params;
-    uint8_t mac[6] = {{0x02, 0x00, 0x00, 0x11, 0x22, 0x33}};
     uint8_t vdev_id = wma_mon_inject_vdev_id;
     QDF_STATUS status;
 
@@ -166,8 +194,13 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 
     if (freq == 0)
         freq = 2412;
+    if (cfreq1 == 0)
+        cfreq1 = freq;
 
-    if (wma_mon_inject_vdev_ready && wma_mon_inject_last_freq == freq)
+    if (wma_mon_inject_vdev_ready &&
+        wma_mon_inject_last_freq == freq &&
+        wma_mon_inject_last_cfreq1 == cfreq1 &&
+        wma_mon_inject_last_width == width)
         return QDF_STATUS_SUCCESS;
 
     if (!wma_mon_inject_vdev_ready) {{
@@ -179,15 +212,15 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
         create_params.nss_5g = 1;
         create_params.pdev_id = 0;
 
-        pr_info("MON_INJ: creating hidden STA vdev_id=%u\\n", vdev_id);
-        status = wmi_unified_vdev_create_send(wma->wmi_handle, mac, &create_params);
+        pr_info("MON_INJ: creating hidden STA vdev_id=%u mac=%pM\\n", vdev_id, wma_mon_inject_mac);
+        status = wmi_unified_vdev_create_send(wma->wmi_handle, wma_mon_inject_mac, &create_params);
         if (QDF_IS_STATUS_ERROR(status)) {{
             pr_err("MON_INJ: vdev_create failed: %d\\n", status);
             return status;
         }}
 
         qdf_mem_zero(&peer_params, sizeof(peer_params));
-        peer_params.peer_addr = mac;
+        peer_params.peer_addr = wma_mon_inject_mac;
         peer_params.peer_type = WMI_PEER_TYPE_DEFAULT;
         peer_params.vdev_id = vdev_id;
         status = wmi_unified_peer_create_send(wma->wmi_handle, &peer_params);
@@ -196,8 +229,9 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 
         qdf_mdelay(15);
     }} else {{
-        pr_info("MON_INJ: refresh/ch %u -> %u on vdev_id=%u\\n",
-            wma_mon_inject_last_freq, freq, vdev_id);
+        pr_info("MON_INJ: refresh/ch %u -> %u (cf1=%u w=%d) on vdev_id=%u\\n",
+            wma_mon_inject_last_freq, freq, cfreq1, width, vdev_id);
+        qdf_mdelay(15);
         wmi_unified_vdev_stop_send(wma->wmi_handle, vdev_id);
         qdf_mdelay(10);
     }}
@@ -205,15 +239,16 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
     qdf_mem_zero(&start_params, sizeof(start_params));
     start_params.vdev_id = vdev_id;
     start_params.channel.mhz = freq;
-    start_params.channel.{cf1_field} = freq;
-    start_params.channel.phy_mode = (freq < 5000) ? WMI_HOST_MODE_11G : WMI_HOST_MODE_11A;
+    start_params.channel.{cf1_field} = cfreq1;
+    start_params.channel.phy_mode = wma_mon_pick_phy_mode(freq, cfreq1, width);
     start_params.channel.maxregpower = 20;
     start_params.channel.maxpower = 20;
     start_params.channel.minpower = 0;
     start_params.beacon_interval = 100;
     start_params.dtim_period = 1;
 
-    pr_info("MON_INJ: starting hidden STA vdev_id=%u freq=%u\\n", vdev_id, freq);
+    pr_info("MON_INJ: starting hidden STA vdev_id=%u freq=%u cf1=%u phy=%u\\n",
+        vdev_id, freq, cfreq1, start_params.channel.phy_mode);
     status = wmi_unified_vdev_start_send(wma->wmi_handle, &start_params);
     if (QDF_IS_STATUS_ERROR(status)) {{
         pr_err("MON_INJ: vdev_start failed: %d\\n", status);
@@ -223,11 +258,14 @@ static QDF_STATUS wma_create_mon_inject_vdev(tp_wma_handle wma, uint32_t freq)
 
     wma_mon_inject_vdev_ready = true;
     wma_mon_inject_last_freq = freq;
+    wma_mon_inject_last_cfreq1 = cfreq1;
+    wma_mon_inject_last_width = width;
     pr_info("MON_INJ: hidden STA vdev_id=%u READY on freq=%u!\\n", vdev_id, freq);
     return QDF_STATUS_SUCCESS;
 }}
 
-int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32_t freq)
+int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len,
+                             uint32_t freq, uint32_t cfreq1, int width)
 {{
     tp_wma_handle wma;
     struct wmi_mgmt_params tx_params;
@@ -237,7 +275,7 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
     uint32_t i, slot = MON_INJ_DESC_SLOTS;
 
     wma = cds_get_context(QDF_MODULE_ID_WMA);
-    if (!wma || !wma->wmi_handle || !frame_data || frame_len < 10)
+    if (!wma || !wma->wmi_handle || !frame_data || frame_len < 10 || frame_len > 1536)
         return -EINVAL;
 
     if (wma_mon_inject_vdev_ready &&
@@ -246,7 +284,7 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32
         wma_mon_inject_last_freq = 0;
     }}
 
-    status = wma_create_mon_inject_vdev(wma, freq);
+    status = wma_create_mon_inject_vdev(wma, freq, cfreq1, width);
     if (QDF_IS_STATUS_ERROR(status))
         return -EIO;
 
@@ -386,14 +424,27 @@ if os.path.exists(cfg_file):
             orig_smc = m_smc.group(2)
             smc_hook_decl = f"""
 static uint32_t mon_saved_freq = 2412;
+static uint32_t mon_saved_cfreq1 = 2412;
+static int mon_saved_width = NL80211_CHAN_WIDTH_20_NOHT;
 uint32_t hdd_mon_get_saved_freq(void) {{ return mon_saved_freq; }}
+uint32_t hdd_mon_get_saved_cfreq1(void) {{ return mon_saved_cfreq1; }}
+int hdd_mon_get_saved_width(void) {{ return mon_saved_width; }}
 static int hdd_mon_set_chan_hook(struct wiphy *wiphy, struct cfg80211_chan_def *chandef)
 {{
-\tif (chandef && chandef->chan) {{
-\t\tmon_saved_freq = chandef->chan->center_freq;
-\t\tpr_info("MON_INJ: set_monitor_channel freq=%u\\n", mon_saved_freq);
-\t}}
-\treturn {orig_smc}(wiphy, chandef);
+    int rc;
+    if (chandef && chandef->chan) {{
+        mon_saved_freq = chandef->chan->center_freq;
+        mon_saved_cfreq1 = chandef->center_freq1 ? chandef->center_freq1 : mon_saved_freq;
+        mon_saved_width = (int)chandef->width;
+        pr_info("MON_INJ: set_monitor_channel freq=%u cf1=%u width=%d\n",
+                mon_saved_freq, mon_saved_cfreq1, mon_saved_width);
+    }}
+    rc = {orig_smc}(wiphy, chandef);
+    if (rc == -EBUSY || rc == -EOPNOTSUPP) {{
+        pr_info("MON_INJ: orig set_monitor_channel rc=%d -> override 0\n", rc);
+        return 0;
+    }}
+    return rc;
 }}
 """
             cfg_txt = cfg_txt[:m_ops.start()] + smc_hook_decl + "\n" + cfg_txt[m_ops.start():]
@@ -441,73 +492,105 @@ txt = open(target_file).read()
 headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n"
 inject_code = r"""
 /* === BEGIN MONITOR TX INJECTION PATCH (LOUKIOUS WMI BYPASS) === */
-extern int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len, uint32_t freq);
+extern int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len,
+                                    uint32_t freq, uint32_t cfreq1, int width);
 extern uint32_t hdd_mon_get_saved_freq(void);
+extern uint32_t hdd_mon_get_saved_cfreq1(void);
+extern int hdd_mon_get_saved_width(void);
 extern void wma_mon_inject_reset(void);
+extern void wma_mon_inject_set_mac(const uint8_t *mac);
 
 static struct sk_buff_head mon_tx_q;
 static struct work_struct mon_tx_work;
 static bool mon_tx_inited;
 static int mon_xmit_log_cnt;
 
+static int hdd_mon_set_mac_hook(struct net_device *dev, void *addr)
+{
+        struct sockaddr *sa = addr;
+
+        if (!dev || !sa)
+                return -EINVAL;
+        if (!is_valid_ether_addr(sa->sa_data))
+                return -EADDRNOTAVAIL;
+        memcpy(dev->dev_addr, sa->sa_data, ETH_ALEN);
+        wma_mon_inject_set_mac(sa->sa_data);
+        pr_info("MON_INJ: set_mac %pM\n", sa->sa_data);
+        return 0;
+}
+
 static int hdd_mon_open_hook(struct net_device *dev)
 {
-	int rc = hdd_mon_open(dev);
-	pr_info("MON_INJ: hdd_mon_open_hook rc=%d\n", rc);
-	if (rc == 0) {
-		netif_carrier_on(dev);
-		netif_tx_start_all_queues(dev);
-	}
-	return rc;
+        int rc = hdd_mon_open(dev);
+        struct wireless_dev *wdev = dev ? dev->ieee80211_ptr : NULL;
+        struct hdd_adapter *adapter = dev ? WLAN_HDD_GET_PRIV_PTR(dev) : NULL;
+        struct hdd_context *hdd_ctx = adapter ? WLAN_HDD_GET_CTX(adapter) : NULL;
+
+        pr_info("MON_INJ: hdd_mon_open_hook rc=%d\n", rc);
+        if (rc == 0) {
+                if (hdd_ctx)
+                        hdd_psoc_idle_timer_stop(hdd_ctx);
+                if (wdev && wdev->wiphy && wdev->wiphy->ops) {
+                        if (wdev->wiphy->ops->abort_scan)
+                                wdev->wiphy->ops->abort_scan(wdev->wiphy, wdev);
+                        if (wdev->wiphy->ops->set_power_mgmt)
+                                wdev->wiphy->ops->set_power_mgmt(wdev->wiphy, dev, false, -1);
+                }
+                netif_carrier_on(dev);
+                netif_tx_start_all_queues(dev);
+        }
+        return rc;
 }
 
 static void hdd_mon_tx_worker(struct work_struct *work)
 {
-	struct sk_buff *skb;
-	uint32_t freq = hdd_mon_get_saved_freq();
+        struct sk_buff *skb;
+        uint32_t freq = hdd_mon_get_saved_freq();
+        uint32_t cf1 = hdd_mon_get_saved_cfreq1();
+        int width = hdd_mon_get_saved_width();
 
-	while ((skb = skb_dequeue(&mon_tx_q)) != NULL) {
-		wma_mon_inject_raw_frame(skb->data, skb->len, freq);
-		dev_kfree_skb_any(skb);
-	}
+        while ((skb = skb_dequeue(&mon_tx_q)) != NULL) {
+                wma_mon_inject_raw_frame(skb->data, skb->len, freq, cf1, width);
+                dev_kfree_skb_any(skb);
+        }
 }
 
 static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct ieee80211_radiotap_header *rtap;
-	u16 rtap_len;
+        struct ieee80211_radiotap_header *rtap;
+        u16 rtap_len;
 
-	if (!mon_tx_inited) {
-		skb_queue_head_init(&mon_tx_q);
-		INIT_WORK(&mon_tx_work, hdd_mon_tx_worker);
-		mon_tx_inited = true;
-	}
+        if (!mon_tx_inited) {
+                skb_queue_head_init(&mon_tx_q);
+                INIT_WORK(&mon_tx_work, hdd_mon_tx_worker);
+                mon_tx_inited = true;
+        }
 
-	if (skb->len < sizeof(*rtap)) {
-		dev_kfree_skb_any(skb);
-		return NETDEV_TX_OK;
-	}
+        if (skb->len < sizeof(*rtap)) {
+                dev_kfree_skb_any(skb);
+                return NETDEV_TX_OK;
+        }
 
-	rtap = (struct ieee80211_radiotap_header *)skb->data;
-	rtap_len = le16_to_cpu(rtap->it_len);
-	if (rtap_len < sizeof(*rtap) || rtap_len > skb->len || skb->len - rtap_len < 10) {
-		dev_kfree_skb_any(skb);
-		return NETDEV_TX_OK;
-	}
+        rtap = (struct ieee80211_radiotap_header *)skb->data;
+        rtap_len = le16_to_cpu(rtap->it_len);
+        if (rtap_len < sizeof(*rtap) || rtap_len > skb->len || skb->len - rtap_len < 10) {
+                dev_kfree_skb_any(skb);
+                return NETDEV_TX_OK;
+        }
 
-	if (mon_xmit_log_cnt < 5) {
-		mon_xmit_log_cnt++;
-		pr_info("MON_INJ: xmit skb_len=%u rtap=%u\n", skb->len, rtap_len);
-	}
+        if (mon_xmit_log_cnt < 5) {
+                mon_xmit_log_cnt++;
+                pr_info("MON_INJ: xmit skb_len=%u rtap=%u\n", skb->len, rtap_len);
+        }
 
-	skb_pull(skb, rtap_len);
-	if (skb_queue_len(&mon_tx_q) < 256) {
-		skb_queue_tail(&mon_tx_q, skb);
-		schedule_work(&mon_tx_work);
-	} else {
-		dev_kfree_skb_any(skb);
-	}
-	return NETDEV_TX_OK;
+        skb_pull(skb, rtap_len);
+        if (skb_queue_len(&mon_tx_q) < 256) {
+                skb_queue_tail(&mon_tx_q, skb);
+                schedule_work(&mon_tx_work);
+        } else {
+                dev_kfree_skb_any(skb);
+        }
+        return NETDEV_TX_OK;
 }
 /* === END MONITOR TX INJECTION PATCH === */
 """
@@ -518,6 +601,10 @@ if ".ndo_start_xmit" in block:
 else:
     new_block = block.replace("{", "{\n\t.ndo_start_xmit = hdd_mon_inject_xmit,", 1)
 new_block = re.sub(r'\.ndo_open\s*=\s*hdd_mon_open\b', '.ndo_open = hdd_mon_open_hook', new_block)
+if ".ndo_set_mac_address" in new_block:
+    new_block = re.sub(r'\.ndo_set_mac_address\s*=\s*[^,\n]+', '.ndo_set_mac_address = hdd_mon_set_mac_hook', new_block)
+else:
+    new_block = new_block.replace("{", "{\n\t.ndo_set_mac_address = hdd_mon_set_mac_hook,", 1)
 m_stop = re.search(r'\.ndo_stop\s*=\s*(\w+)', new_block)
 if m_stop and "hdd_mon_stop_hook" not in inject_code:
     orig_stop = m_stop.group(1)
