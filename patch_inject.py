@@ -629,3 +629,88 @@ else:
 
 open(target_file, "w").write(txt)
 print("[OK] Патч TX-инъекции (@Loukious WMI hidden STA vdev) применён")
+
+# 5. Этап 2: BIT(NL80211_IFTYPE_MONITOR) в wiphy->interface_modes + change_virtual_intf -> con_mode (async workqueue)
+if os.path.exists(cfg_file):
+    cfg_txt = open(cfg_file, errors="ignore").read()
+    # 5a) Разрешаем NL80211_IFTYPE_MONITOR в wiphy->interface_modes
+    if "MON_INJ_IFTYPE_PATCHED" not in cfg_txt:
+        m_im = re.search(r'(wiphy->interface_modes\s*=\s*[^;]+;)', cfg_txt)
+        if m_im:
+            cfg_txt = (
+                cfg_txt[:m_im.end()]
+                + "\n\t/* MON_INJ_IFTYPE_PATCHED */\n\twiphy->interface_modes |= BIT(NL80211_IFTYPE_MONITOR);\n"
+                + cfg_txt[m_im.end():]
+            )
+            print("[OK] Добавлен BIT(NL80211_IFTYPE_MONITOR) в wiphy->interface_modes")
+        else:
+            print("[WARN] wiphy->interface_modes не найдена в wlan_hdd_cfg80211.c")
+
+    # 5b) Перехватываем .change_virtual_intf для переключения NL80211_IFTYPE_MONITOR <-> STATION
+    if "hdd_mon_change_iface_hook" not in cfg_txt:
+        m_ci = re.search(r'(\.change_virtual_intf\s*=\s*)(\w+)', cfg_txt)
+        m_ops2 = re.search(r'(?:static\s+)?(?:const\s+)?struct\s+cfg80211_ops\s+(\w+)\s*=', cfg_txt)
+        if m_ci and m_ops2:
+            orig_ci = m_ci.group(2)
+            ci_hook = f"""
+extern void hdd_mon_schedule_con_mode(int mode);
+static int hdd_mon_change_iface_hook(struct wiphy *wiphy,
+                                     struct net_device *dev,
+                                     enum nl80211_iftype type,
+                                     struct vif_params *params)
+{{
+    if (type == NL80211_IFTYPE_MONITOR) {{
+        pr_info("MON_INJ: change_virtual_intf -> MONITOR (async con_mode=4)\\n");
+        hdd_mon_schedule_con_mode(4);
+        return 0;
+    }}
+    if (dev && dev->ieee80211_ptr &&
+        dev->ieee80211_ptr->iftype == NL80211_IFTYPE_MONITOR &&
+        type == NL80211_IFTYPE_STATION) {{
+        pr_info("MON_INJ: change_virtual_intf MONITOR -> STATION (async con_mode=0)\\n");
+        hdd_mon_schedule_con_mode(0);
+        return 0;
+    }}
+    return {orig_ci}(wiphy, dev, type, params);
+}}
+"""
+            cfg_txt = cfg_txt[:m_ops2.start()] + ci_hook + "\n" + cfg_txt[m_ops2.start():]
+            cfg_txt = re.sub(r'(\.change_virtual_intf\s*=\s*)' + re.escape(orig_ci),
+                             r'\1hdd_mon_change_iface_hook', cfg_txt, count=1)
+            print(f"[OK] Перехвачен .change_virtual_intf ({orig_ci} -> hdd_mon_change_iface_hook)")
+        else:
+            print("[WARN] .change_virtual_intf не найден в wlan_hdd_cfg80211.c")
+    open(cfg_file, "w").write(cfg_txt)
+
+# 5c) В wlan_hdd_main.c добавляем hdd_mon_schedule_con_mode (асинхронный вызов con_mode_handler вне rtnl_lock)
+hdd_main_f = os.path.join(root, "core/hdd/src/wlan_hdd_main.c")
+if os.path.exists(hdd_main_f):
+    hm_txt = open(hdd_main_f, errors="ignore").read()
+    if "hdd_mon_schedule_con_mode" not in hm_txt:
+        switch_code = """
+/* === BEGIN MON_INJ ASYNC CON_MODE SWITCH === */
+static struct work_struct mon_mode_switch_work;
+static bool mon_mode_work_inited;
+static int mon_target_con_mode;
+
+static void hdd_mon_mode_switch_worker(struct work_struct *work)
+{
+    char val[8];
+    snprintf(val, sizeof(val), "%d", mon_target_con_mode);
+    pr_info("MON_INJ: async con_mode_handler(%s)\\n", val);
+    con_mode_handler(val, &__param_con_mode);
+}
+
+void hdd_mon_schedule_con_mode(int mode)
+{
+    if (!mon_mode_work_inited) {
+        INIT_WORK(&mon_mode_switch_work, hdd_mon_mode_switch_worker);
+        mon_mode_work_inited = true;
+    }
+    mon_target_con_mode = mode;
+    schedule_work(&mon_mode_switch_work);
+}
+/* === END MON_INJ ASYNC CON_MODE SWITCH === */
+"""
+        open(hdd_main_f, "w").write(hm_txt + switch_code)
+        print("[OK] Добавлен hdd_mon_schedule_con_mode в wlan_hdd_main.c")
