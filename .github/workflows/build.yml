@@ -107,11 +107,8 @@ jobs:
             -j"$(nproc)" \
             modules_prepare
 
-          # Проверяем реальный offsetof(struct net_device, ieee80211_ptr) через Kbuild (ожидаем 0x5d8)
           mkdir -p /tmp/chk_netdev
           cat <<'C' > /tmp/chk_netdev/chk_netdev.c
-          #include <linux/module.h>
-          #include <linux/netdevice.h>
           char chk_off[offsetof(struct net_device, ieee80211_ptr)] __used;
           MODULE_LICENSE("GPL");
           C
@@ -178,7 +175,6 @@ jobs:
           done
           echo "Selected WLAN_PROFILE=$WLAN_PROFILE"
 
-          # Подключаем include-каталоги wlan + все нужные подкаталоги cmn/hif (SNOC/CE/dispatcher)
           EXTRA_INC=""
           for d in $(find "$PWD/modules/qcom/opensource/wlan" -maxdepth 4 -type d -name "include" 2>/dev/null); do
             EXTRA_INC="$EXTRA_INC -I$d"
@@ -187,7 +183,6 @@ jobs:
             EXTRA_INC="$EXTRA_INC -I$d"
           done
 
-          # Ищем icnss2.h и cnss*.h (включая папки inc/) и гарантируем <soc/qcom/icnss2.h> до старта make
           mkdir -p "$PWD/extra_inc/soc/qcom" "$PWD/extra_inc/net"
           for h in $(find "$PWD/modules" "$KDIR" -type f \( -name "icnss2.h" -o -name "cnss2.h" -o -name "cnss_utils.h" -o -name "cnss_prealloc.h" -o -name "cnss_nl.h" \) 2>/dev/null); do
             echo "Found header: $h"
@@ -206,7 +201,6 @@ jobs:
           test -s "$PWD/extra_inc/soc/qcom/icnss2.h"
           EXTRA_INC="$EXTRA_INC -I$PWD/extra_inc"
 
-          # Включаем MLO/link_id макросы qcacld-3.0 под cfg80211.h ядра
           MLO_FLAGS=""
           grep -qF "unsigned int link_id" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_SINGLE_NETDEV_MULTI_LINK_SUPPORT"
           grep -qF "struct link_station_parameters" "$CFG_H" && MLO_FLAGS="$MLO_FLAGS -DCFG80211_LINK_STA_PARAMS_PRESENT"

@@ -15,7 +15,6 @@ sleep 5
 svc wifi disable
 sleep 3
 
-# Ждём, пока HAL отпустит стоковый wlan (до 10 попыток)
 r=0
 while grep -q "^wlan " /proc/modules && [ $r -lt 10 ]; do
     rmmod wlan 2>/dev/null && break

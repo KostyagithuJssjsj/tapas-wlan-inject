@@ -41,8 +41,6 @@ jobs:
         run: |
           mkdir -p hello_mod
           cat <<'C' > hello_mod/test_hello.c
-          #include <linux/module.h>
-          #include <linux/kernel.h>
           static int __init hello_init(void) { pr_info("TAPAS_HELLO_OK\n"); return 0; }
           static void __exit hello_exit(void) { pr_info("TAPAS_HELLO_EXIT\n"); }
           module_init(hello_init);

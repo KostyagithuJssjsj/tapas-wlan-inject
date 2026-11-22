@@ -3,7 +3,6 @@ import os, re, sys
 root = sys.argv[1] if len(sys.argv) > 1 else "qcacld-3.0"
 kbuild = os.path.join(root, "Kbuild")
 
-# 1. Включаем поддержку режима мониторинга в Kbuild
 if os.path.exists(kbuild):
     txt = open(kbuild).read()
     if "CONFIG_FEATURE_MONITOR_MODE_SUPPORT := y" not in txt:
@@ -11,7 +10,6 @@ if os.path.exists(kbuild):
         open(kbuild, "w").write(txt)
         print("[OK] Kbuild обновлён")
 
-# Автоопределяем точные имена WMI API в текущем qcacld-3.0 (5.15)
 wmi_api_txt = ""
 for fn in ["cmn/wmi/inc/wmi_unified_api.h", "cmn/wmi/inc/wmi_unified_param.h",
            "cmn/wmi/inc/wmi_unified_vdev_api.h", "cmn/wmi/inc/wmi_unified_vdev_param.h"]:
@@ -65,13 +63,11 @@ else:
 print(f"[INFO] cdp_uses_vdev_info={cdp_uses_vdev_info}")
 cdp_attach_code = ""
 
-# 2. В core/wma/src/wma_dev_if.c добавляем обход @Loukious (hidden STA vdev + self-peer + WMI_MGMT_TX)
 wma_file = os.path.join(root, "core/wma/src/wma_dev_if.c")
 if os.path.exists(wma_file):
     wma_txt = open(wma_file, errors="ignore").read()
     if "wma_mon_inject_raw_frame" not in wma_txt:
         wma_code = f"""
-/* === BEGIN LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
 #include <linux/spinlock.h>
 #include <linux/jiffies.h>
 #include <linux/nl80211.h>
@@ -381,12 +377,10 @@ int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len,
     wma_mon_frames_since_refresh++;
     return 0;
 }}
-/* === END LOUKIOUS HIDDEN-STA VDEV INJECTION BYPASS === */
 """
         open(wma_file, "w").write(wma_txt + wma_code)
         print("[OK] Добавлен обход @Loukious (hidden STA vdev) в wma_dev_if.c")
 
-# 2b. Перехватываем completion наших desc_id (0xE000..0xE03F) в wma_mgmt.c
 wma_src_dir = os.path.join(root, "core/wma/src")
 if os.path.isdir(wma_src_dir):
     for fn in sorted(os.listdir(wma_src_dir)):
@@ -410,7 +404,6 @@ if os.path.isdir(wma_src_dir):
             print(f"[OK] Перехвачен wma_process_mgmt_tx_completion в {fn} ({wma_v}, {desc_v})")
             break
 
-# 3. В wlan_hdd_cfg80211.c перехватываем set_monitor_channel и экспортируем частоту
 cfg_file = os.path.join(root, "core/hdd/src/wlan_hdd_cfg80211.c")
 if os.path.exists(cfg_file):
     cfg_txt = open(cfg_file, errors="ignore").read()
@@ -455,7 +448,6 @@ static int hdd_mon_set_chan_hook(struct wiphy *wiphy, struct cfg80211_chan_def *
         open(cfg_file, "w").write(cfg_txt)
         print("[OK] Перехвачен set_monitor_channel в wlan_hdd_cfg80211.c")
 
-# 4. В wlan_hdd_main.c будим TX-очередь монитора и шлём кадры в wma_mon_inject_raw_frame
 hdd_dir = os.path.join(root, "core/hdd")
 patterns = [
     re.compile(r'((?:static\s+)?(?:const\s+)?struct\s+net_device_ops\s+\w+\s*=\s*\{[^}]*hdd_mon_open[^}]*\};)', re.S),
@@ -491,7 +483,6 @@ if not match:
 txt = open(target_file).read()
 headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n#include <linux/delay.h>\n"
 inject_code = r"""
-/* === BEGIN MONITOR TX INJECTION PATCH (LOUKIOUS WMI BYPASS) === */
 extern int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len,
                                     uint32_t freq, uint32_t cfreq1, int width);
 extern uint32_t hdd_mon_get_saved_freq(void);
@@ -595,7 +586,6 @@ static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *d
         }
         return NETDEV_TX_OK;
 }
-/* === END MONITOR TX INJECTION PATCH === */
 """
 
 block = match.group(1)
@@ -638,10 +628,8 @@ else:
 open(target_file, "w").write(txt)
 print("[OK] Патч TX-инъекции (@Loukious WMI hidden STA vdev) применён")
 
-# 5. Этап 2: BIT(NL80211_IFTYPE_MONITOR) в wiphy->interface_modes + change_virtual_intf -> con_mode (async workqueue)
 if os.path.exists(cfg_file):
     cfg_txt = open(cfg_file, errors="ignore").read()
-    # 5a) Разрешаем NL80211_IFTYPE_MONITOR в wiphy->interface_modes
     if "MON_INJ_IFTYPE_PATCHED" not in cfg_txt:
         m_im = re.search(r'(wiphy->interface_modes\s*=\s*[^;]+;)', cfg_txt)
         if m_im:
@@ -654,7 +642,6 @@ if os.path.exists(cfg_file):
         else:
             print("[WARN] wiphy->interface_modes не найдена в wlan_hdd_cfg80211.c")
 
-    # 5b) Перехватываем .change_virtual_intf для переключения NL80211_IFTYPE_MONITOR <-> STATION
     if "hdd_mon_change_iface_hook" not in cfg_txt:
         m_ci = re.search(r'(\.change_virtual_intf\s*=\s*)(\w+)', cfg_txt)
         m_ops2 = re.search(r'(?:static\s+)?(?:const\s+)?struct\s+cfg80211_ops\s+(\w+)\s*=', cfg_txt)
@@ -690,13 +677,11 @@ static int hdd_mon_change_iface_hook(struct wiphy *wiphy,
             print("[WARN] .change_virtual_intf не найден в wlan_hdd_cfg80211.c")
     open(cfg_file, "w").write(cfg_txt)
 
-# 5c) В wlan_hdd_main.c добавляем hdd_mon_schedule_con_mode (асинхронный вызов con_mode_handler вне rtnl_lock)
 hdd_main_f = os.path.join(root, "core/hdd/src/wlan_hdd_main.c")
 if os.path.exists(hdd_main_f):
     hm_txt = open(hdd_main_f, errors="ignore").read()
     if "hdd_mon_schedule_con_mode" not in hm_txt:
         switch_code = """
-/* === BEGIN MON_INJ ASYNC CON_MODE SWITCH === */
 static struct work_struct mon_mode_switch_work;
 static bool mon_mode_work_inited;
 static int mon_target_con_mode;
@@ -718,7 +703,6 @@ void hdd_mon_schedule_con_mode(int mode)
     mon_target_con_mode = mode;
     schedule_work(&mon_mode_switch_work);
 }
-/* === END MON_INJ ASYNC CON_MODE SWITCH === */
 """
         open(hdd_main_f, "w").write(hm_txt + switch_code)
         print("[OK] Добавлен hdd_mon_schedule_con_mode в wlan_hdd_main.c")
