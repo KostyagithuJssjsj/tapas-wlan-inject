@@ -78,7 +78,7 @@ if os.path.exists(wma_file):
 #include "wmi_unified_api.h"
 
 #define MON_INJ_DESC_MAGIC 0xE000U
-#define MON_INJ_DESC_SLOTS 16U
+#define MON_INJ_DESC_SLOTS 64U
 #define MON_INJ_DESC_MASK  (MON_INJ_DESC_SLOTS - 1U)
 #define MON_INJ_VDEV_REFRESH_PERIOD 20000U
 
@@ -489,7 +489,7 @@ if not match:
     sys.exit(1)
 
 txt = open(target_file).read()
-headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n"
+headers = "\n#include <net/cfg80211.h>\n#include <net/ieee80211_radiotap.h>\n#include <linux/workqueue.h>\n#include <linux/delay.h>\n"
 inject_code = r"""
 /* === BEGIN MONITOR TX INJECTION PATCH (LOUKIOUS WMI BYPASS) === */
 extern int wma_mon_inject_raw_frame(const uint8_t *frame_data, size_t frame_len,
@@ -505,6 +505,8 @@ static struct sk_buff_head mon_tx_q;
 static struct work_struct mon_tx_work;
 static bool mon_tx_inited;
 static int mon_xmit_log_cnt;
+static bool mon_tx_stopping;
+static unsigned long mon_tx_sent_cnt, mon_tx_drop_cnt, mon_tx_qdrop_cnt;
 
 static int hdd_mon_set_mac_hook(struct net_device *dev, void *addr)
 {
@@ -533,6 +535,8 @@ static int hdd_mon_open_hook(struct net_device *dev)
                         hdd_psoc_idle_timer_stop(hdd_ctx);
                 if (wdev && wdev->wiphy)
                         wlan_hdd_cfg80211_abort_scan(wdev->wiphy, wdev);
+                WRITE_ONCE(mon_tx_stopping, false);
+                mon_tx_sent_cnt = mon_tx_drop_cnt = mon_tx_qdrop_cnt = 0;
                 netif_carrier_on(dev);
                 netif_tx_start_all_queues(dev);
         }
@@ -542,12 +546,14 @@ static int hdd_mon_open_hook(struct net_device *dev)
 static void hdd_mon_tx_worker(struct work_struct *work)
 {
         struct sk_buff *skb;
-        uint32_t freq = hdd_mon_get_saved_freq();
-        uint32_t cf1 = hdd_mon_get_saved_cfreq1();
-        int width = hdd_mon_get_saved_width();
-
-        while ((skb = skb_dequeue(&mon_tx_q)) != NULL) {
-                wma_mon_inject_raw_frame(skb->data, skb->len, freq, cf1, width);
+        int retries = 0;
+        while (!READ_ONCE(mon_tx_stopping) && (skb = skb_dequeue(&mon_tx_q)) != NULL) {
+                int rc = wma_mon_inject_raw_frame(skb->data, skb->len, hdd_mon_get_saved_freq(), hdd_mon_get_saved_cfreq1(), hdd_mon_get_saved_width());
+                if (rc == -EBUSY && retries < 25 && !READ_ONCE(mon_tx_stopping)) {
+                        skb_queue_head(&mon_tx_q, skb); retries++; msleep(1); continue;
+                }
+                retries = 0;
+                if (rc == 0) mon_tx_sent_cnt++; else mon_tx_drop_cnt++;
                 dev_kfree_skb_any(skb);
         }
 }
@@ -581,11 +587,11 @@ static netdev_tx_t hdd_mon_inject_xmit(struct sk_buff *skb, struct net_device *d
         }
 
         skb_pull(skb, rtap_len);
-        if (skb_queue_len(&mon_tx_q) < 256) {
-                skb_queue_tail(&mon_tx_q, skb);
-                schedule_work(&mon_tx_work);
+        if (!READ_ONCE(mon_tx_stopping) && skb_queue_len(&mon_tx_q) < 512) {
+                dev->stats.tx_packets++; dev->stats.tx_bytes += skb->len;
+                skb_queue_tail(&mon_tx_q, skb); schedule_work(&mon_tx_work);
         } else {
-                dev_kfree_skb_any(skb);
+                dev->stats.tx_dropped++; mon_tx_qdrop_cnt++; dev_kfree_skb_any(skb);
         }
         return NETDEV_TX_OK;
 }
@@ -608,11 +614,13 @@ if m_stop and "hdd_mon_stop_hook" not in inject_code:
     inject_code += f'''
 static int hdd_mon_stop_hook(struct net_device *dev)
 {{
-	if (mon_tx_inited) {{
+	WRITE_ONCE(mon_tx_stopping, true);
+        if (mon_tx_inited) {{
 		cancel_work_sync(&mon_tx_work);
 		skb_queue_purge(&mon_tx_q);
 	}}
-	wma_mon_inject_reset();
+	pr_info("MON_INJ: tx stats sent=%lu wma_drop=%lu q_drop=%lu\\n", mon_tx_sent_cnt, mon_tx_drop_cnt, mon_tx_qdrop_cnt);
+        wma_mon_inject_reset();
 	return {orig_stop}(dev);
 }}
 '''
