@@ -109,6 +109,8 @@ jobs:
 
           mkdir -p /tmp/chk_netdev
           cat <<'C' > /tmp/chk_netdev/chk_netdev.c
+          #include <linux/module.h>
+          #include <linux/netdevice.h>
           char chk_off[offsetof(struct net_device, ieee80211_ptr)] __used;
           MODULE_LICENSE("GPL");
           C
